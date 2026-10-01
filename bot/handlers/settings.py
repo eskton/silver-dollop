@@ -13,9 +13,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, func, select
 
-from ..db import AutoReply, DeliveryItem, Seller, SessionFactory, Template
+from ..db import AutoReply, DeliveryItem, RelistRule, Seller, SessionFactory, Template
+from ..crypto import TokenCipher
 from ..keyboards import BTN_CANCEL, BTN_SETTINGS, cancel_kb, main_menu
+from ..playerok import AuthRequired, PlayerokClient, PlayerokError
 from ..services import features as ft
+from ..services.automation import relist_candidates
 from ..services.sellers import get_or_create_seller
 
 router = Router(name="settings")
@@ -41,6 +44,10 @@ class AddStock(StatesGroup):
 class AddReply(StatesGroup):
     keyword = State()
     text = State()
+
+
+class AddRelistRule(StatesGroup):
+    pattern = State()
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
@@ -100,6 +107,8 @@ async def render_feature(
         return await render_autodelivery(sessions, seller, feature)
     if feature.special == "autoresponder":
         return await render_autoresponder(sessions, seller, feature)
+    if feature.special == "relist":
+        return await render_relist(sessions, seller, feature)
 
     tg = seller.tg_id
     async with sessions() as session:
@@ -123,16 +132,21 @@ async def render_feature(
         for p in feature.params:
             value = await ft.get_param(session, tg, p.key)
             rows.append([_btn(f"⏱ {p.label}: {value} {p.unit}", f"f:{feature.key}:p:{p.key}")])
-        for key, label in feature.toggles:
-            default = key in ("autoconfirm_only_delivered", "autoconfirm_msg_enabled")
-            flag = await ft.get_flag(session, tg, key, default)
-            rows.append([_btn(f"{'✅' if flag else '☑️'} {label}", f"f:{feature.key}:g:{key}")])
+        rows += await _toggle_rows(session, tg, feature)
     if feature.templates:
         lines += ["", ft.VARIABLES_HELP]
     if feature.note:
         lines += ["", feature.note]
     rows.append([_btn("‹ Назад", "st")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _toggle_rows(session, tg: int, feature: ft.Feature) -> list[list[InlineKeyboardButton]]:
+    rows = []
+    for key, label, default in feature.toggles:
+        flag = await ft.get_flag(session, tg, key, default)
+        rows.append([_btn(f"{'✅' if flag else '☑️'} {label}", f"f:{feature.key}:g:{key}")])
+    return rows
 
 
 async def _seller(sessions: SessionFactory, cb: CallbackQuery) -> Seller:
@@ -161,9 +175,9 @@ async def feature_cb(cb: CallbackQuery, state: FSMContext, sessions: SessionFact
         async with sessions() as session:
             enabled = await ft.is_enabled(session, tg, feature)
             await ft.set_setting(session, tg, f"{feature.key}_enabled", "0" if enabled else "1")
-    elif action == "g" and any(arg == k for k, _ in feature.toggles):
+    elif action == "g" and any(arg == k for k, _, _ in feature.toggles):
         async with sessions() as session:
-            default = arg in ("autoconfirm_only_delivered", "autoconfirm_msg_enabled")
+            default = next(d for k, _, d in feature.toggles if k == arg)
             flag = await ft.get_flag(session, tg, arg, default)
             await ft.set_setting(session, tg, arg, "0" if flag else "1")
     elif action == "e" and arg in ft.TEMPLATE_KINDS:
@@ -217,8 +231,8 @@ async def _finish(message: Message, state: FSMContext, sessions: SessionFactory,
     await message.answer(text, reply_markup=kb)
 
 
-@router.message(StateFilter(EditText, EditParam, ItemRule, AddStock, AddReply), F.text == BTN_CANCEL)
-@router.message(StateFilter(EditText, EditParam, ItemRule, AddStock, AddReply), Command("cancel"))
+@router.message(StateFilter(EditText, EditParam, ItemRule, AddStock, AddReply, AddRelistRule), F.text == BTN_CANCEL)
+@router.message(StateFilter(EditText, EditParam, ItemRule, AddStock, AddReply, AddRelistRule), Command("cancel"))
 async def cancel_edit(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
     await state.clear()
     async with sessions() as session:
@@ -436,3 +450,95 @@ async def reply_del(cb: CallbackQuery, sessions: SessionFactory) -> None:
         )
         await session.commit()
     await _refresh(cb, sessions, ft.FEATURE_BY_KEY["autoresponder"])
+
+
+# ===================== автовыставление =====================
+
+
+async def render_relist(
+    sessions: SessionFactory, seller: Seller, feature: ft.Feature
+) -> tuple[str, InlineKeyboardMarkup]:
+    tg = seller.tg_id
+    async with sessions() as session:
+        enabled = await ft.is_enabled(session, tg, feature)
+        all_lots = await ft.get_flag(session, tg, "relist_all", True)
+        paid_ok = await ft.get_flag(session, tg, "relist_paid_allowed", False)
+        interval = await ft.get_param(session, tg, "relist_interval_hours")
+        rules = list(await session.scalars(select(RelistRule).where(RelistRule.seller_tg_id == tg)))
+        toggle_rows = await _toggle_rows(session, tg, feature)
+    lines = [
+        f"<b>{feature.title}</b>",
+        "",
+        feature.description,
+        "",
+        f"<b>Статус:</b> {_status(enabled)}",
+        f"<b>Режим:</b> {'все проданные лоты' if all_lots else 'только по правилам'}",
+        f"<b>Интервал:</b> {interval} ч." if interval else "<b>Интервал:</b> сразу",
+        f"<b>Платное восстановление:</b> {'🟢 разрешено' if paid_ok else '🔴 запрещено (только бесплатные статусы)'}",
+        f"<b>Правил отбора:</b> {len(rules)}",
+    ]
+    if rules:
+        lines += [""] + [f"• {html.escape(r.pattern)}" for r in rules]
+    lines += ["", feature.note]
+    rows = [[_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")]]
+    rows.append([_btn(f"⏱ Интервал: {interval} ч.", f"f:{feature.key}:p:relist_interval_hours")])
+    rows += toggle_rows
+    rows.append([_btn("➕ Добавить правило (слово/ссылка)", "rl:add")])
+    rows += [[_btn(f"🗑 {r.pattern[:30]}", f"rl:del:{r.id}")] for r in rules]
+    rows.append([_btn("👁 Показать, что попадёт под восстановление", "rl:preview")])
+    rows.append([_btn("‹ Назад", "st")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "rl:add")
+async def relist_rule_add(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AddRelistRule.pattern)
+    await state.update_data(feature="relist")
+    await cb.answer()
+    await cb.message.answer(
+        "Пришли ключевое слово из названия лота или ссылку на лот:", reply_markup=cancel_kb()
+    )
+
+
+@router.message(AddRelistRule.pattern, F.text)
+async def relist_rule_save(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        session.add(RelistRule(seller_tg_id=message.from_user.id, pattern=message.text.strip()))
+        await session.commit()
+    await _finish(message, state, sessions, "✅ Правило добавлено.")
+
+
+@router.callback_query(F.data.startswith("rl:del:"))
+async def relist_rule_del(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    rule_id = int(cb.data.split(":")[2])
+    async with sessions() as session:
+        await session.execute(
+            delete(RelistRule).where(RelistRule.id == rule_id, RelistRule.seller_tg_id == cb.from_user.id)
+        )
+        await session.commit()
+    await _refresh(cb, sessions, ft.FEATURE_BY_KEY["relist"])
+
+
+@router.callback_query(F.data == "rl:preview")
+async def relist_preview(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    seller = await _seller(sessions, cb)
+    if not seller.is_connected:
+        await cb.answer("Аккаунт не подключён", show_alert=True)
+        return
+    try:
+        async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+            items = await client.my_items(seller.playerok_id or "")
+    except AuthRequired:
+        await cb.answer("Сессия истекла, войди заново", show_alert=True)
+        return
+    except PlayerokError as e:
+        await cb.answer(f"Ошибка Playerok: {e}"[:200], show_alert=True)
+        return
+    async with sessions() as session:
+        candidates = await relist_candidates(session, seller.tg_id, items)
+    await cb.answer()
+    if not candidates:
+        await cb.message.answer("Сейчас под восстановление ничего не попадает.")
+        return
+    lines = [f"• {html.escape(i.name)} — {i.status.lower()}" + (" (платно)" if i.is_paid_relist else "") for i in candidates[:50]]
+    await cb.message.answer("Под восстановление попадут:\n" + "\n".join(lines))

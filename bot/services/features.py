@@ -41,7 +41,7 @@ class Feature:
     description: str
     templates: tuple[TemplateKind, ...] = ()
     params: tuple[Param, ...] = ()
-    toggles: tuple[tuple[str, str], ...] = ()  # (ключ настройки, подпись)
+    toggles: tuple[tuple[str, str, bool], ...] = ()  # (ключ настройки, подпись, по умолчанию)
     default_enabled: bool = False
     note: str = ""
     special: str = ""  # отдельный экран: autodelivery | autoresponder
@@ -86,8 +86,8 @@ FEATURES: tuple[Feature, ...] = (
         ),
         params=(Param("autoconfirm_delay", "Задержка", "мин", 0, 0, 1440),),
         toggles=(
-            ("autoconfirm_only_delivered", "Подтверждать только после автовыдачи"),
-            ("autoconfirm_msg_enabled", "Сообщение покупателю"),
+            ("autoconfirm_only_delivered", "Подтверждать только после автовыдачи", True),
+            ("autoconfirm_msg_enabled", "Сообщение покупателю", True),
         ),
         note="⚠️ Если «только после автовыдачи» выключено, бот подтвердит любой оплаченный заказ — "
         "включай это только для лотов, где выдавать ничего не нужно.",
@@ -106,7 +106,17 @@ FEATURES: tuple[Feature, ...] = (
     Feature(
         key="relist",
         title="🔁 Автовыставление лотов",
-        description="Если лот снят с продажи (закончился или истёк), бот выставляет его заново.",
+        description="После продажи товара бот выставляет такой же лот заново: все проданные "
+        "лоты или только выбранные по ключевому слову в названии или ссылке. Проверка раз в "
+        "~10 минут, поэтому возможна задержка.",
+        params=(Param("relist_interval_hours", "Интервал", "ч", 1, 0, 720),),
+        toggles=(
+            ("relist_all", "Восстанавливать все лоты", True),
+            ("relist_paid_allowed", "Платное восстановление", False),
+        ),
+        special="relist",
+        note="Если платное восстановление выключено, бот выставляет только лоты с бесплатным "
+        "статусом размещения.",
     ),
     Feature(
         key="autodelivery",
@@ -132,16 +142,21 @@ FEATURES: tuple[Feature, ...] = (
     Feature(
         key="confirm_reminder",
         title="⏰ Напоминание о подтверждении",
-        description="Если покупатель не подтвердил заказ через заданное время после выдачи, "
-        "бот напомнит ему об этом.",
+        description="Если покупатель не подтвердил заказ после выдачи, бот напомнит ему: "
+        "один раз или циклично, пока не подтвердит.",
         templates=(
             TemplateKind(
                 "confirm_reminder",
                 "напоминание",
-                "{Имя_Клиента}, не забудьте подтвердить заказ: {Ссылка_Заказа}",
+                "Здравствуйте! Если вы уже получили товар и всё в порядке, пожалуйста, "
+                "подтвердите получение заказа: {Ссылка_Заказа}",
             ),
         ),
-        params=(Param("confirm_reminder_hours", "Через", "ч", 12, 1, 720),),
+        params=(
+            Param("confirm_reminder_minutes", "Первая задержка", "мин", 60, 1, 43200),
+            Param("confirm_reminder_repeat_minutes", "Повтор каждые", "мин", 180, 5, 43200),
+        ),
+        toggles=(("confirm_reminder_cyclic", "Режим: цикличный", True),),
     ),
     Feature(
         key="review_reminder",
@@ -170,7 +185,7 @@ FEATURES: tuple[Feature, ...] = (
             ),
         ),
         params=(Param("offline_repeat_hours", "Не чаще раза в", "ч", 6, 1, 168),),
-        toggles=(("offline_mode", "Режим «не в сети»"),),
+        toggles=(("offline_mode", "Режим «не в сети»", False),),
     ),
     Feature(
         key="ignore",

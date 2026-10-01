@@ -104,6 +104,7 @@ class Item:
     price: float | None
     status: str
     position: int | None
+    relist_price: float | None  # стоимость статуса размещения; 0/None — бесплатно
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> "Item":
@@ -115,7 +116,16 @@ class Item:
             price=_get(raw, "price"),
             status=str(_get(raw, "status", default="")),
             position=int(pos) if isinstance(pos, (int, float)) else None,
+            relist_price=_get(raw, "priorityStatus", "price"),
         )
+
+    @property
+    def url(self) -> str:
+        return f"{BASE_URL}/products/{self.slug or self.id}"
+
+    @property
+    def is_paid_relist(self) -> bool:
+        return isinstance(self.relist_price, (int, float)) and self.relist_price > 0
 
 
 @dataclass(frozen=True)

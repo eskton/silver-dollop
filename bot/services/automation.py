@@ -14,8 +14,17 @@ from aiogram import Bot
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import ActionLog, AutoReply, ChatState, DealState, DeliveryItem, Seller, SessionFactory
-from ..playerok import ChatPreview, Deal, PlayerokClient, PlayerokError
+from ..db import (
+    ActionLog,
+    AutoReply,
+    ChatState,
+    DealState,
+    DeliveryItem,
+    RelistRule,
+    Seller,
+    SessionFactory,
+)
+from ..playerok import ChatPreview, Deal, Item, PlayerokClient, PlayerokError
 from . import features as ft
 
 log = logging.getLogger(__name__)
@@ -177,11 +186,19 @@ async def _process_deal(
         )
 
     # --- напоминания ---
-    if cur == "SENT" and state.sent_at and not state.confirm_reminded:
+    if cur == "SENT" and state.sent_at:
         if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["confirm_reminder"]):
-            hours = await ft.get_param(session, tg, "confirm_reminder_hours")
-            if now - state.sent_at >= timedelta(hours=hours):
-                state.confirm_reminded = True
+            if state.confirm_reminded_at is None:
+                first = await ft.get_param(session, tg, "confirm_reminder_minutes")
+                due = now - state.sent_at >= timedelta(minutes=first)
+            elif await ft.get_flag(session, tg, "confirm_reminder_cyclic", True):
+                repeat = await ft.get_param(session, tg, "confirm_reminder_repeat_minutes")
+                due = now - state.confirm_reminded_at >= timedelta(minutes=repeat)
+            else:
+                due = False
+            if due:
+                state.confirm_reminded_at = now
+                state.confirm_reminders = (state.confirm_reminders or 0) + 1
                 await _say(client, deal.chat_id, await _tpl(session, seller, "confirm_reminder", deal))
     if (
         cur in BUYER_CONFIRMED
@@ -364,11 +381,11 @@ async def process_items(
                 await bot.send_message(tg, f"🚀 Поднял лот «{html.escape(item.name)}».")
 
         if relist_on:
-            for item in items:
-                if item.status.upper() not in RELIST_STATUSES:
-                    continue
+            interval = timedelta(hours=await ft.get_param(session, tg, "relist_interval_hours"))
+            candidates = await relist_candidates(session, tg, items)
+            for item in candidates:
                 last = await _last_action(session, tg, "relist", item.id)
-                if last and now - last < timedelta(hours=24):
+                if last and now - last < interval:
                     continue
                 try:
                     await client.publish_item(item.id)
@@ -378,6 +395,28 @@ async def process_items(
                 session.add(ActionLog(seller_tg_id=tg, kind="relist", target=item.id))
                 await session.commit()
                 await bot.send_message(tg, f"🔁 Выставил заново лот «{html.escape(item.name)}».")
+
+
+async def relist_candidates(session: AsyncSession, tg: int, items: list[Item]) -> list[Item]:
+    """Проданные лоты, которые подходят под режим и правила автовыставления."""
+    all_lots = await ft.get_flag(session, tg, "relist_all", True)
+    paid_ok = await ft.get_flag(session, tg, "relist_paid_allowed", False)
+    patterns = [
+        r.pattern.lower()
+        for r in await session.scalars(select(RelistRule).where(RelistRule.seller_tg_id == tg))
+    ]
+    result = []
+    for item in items:
+        if item.status.upper() not in RELIST_STATUSES:
+            continue
+        if item.is_paid_relist and not paid_ok:
+            continue
+        if not all_lots:
+            hay = f"{item.name} {item.url}".lower()
+            if not any(p in hay for p in patterns):
+                continue
+        result.append(item)
+    return result
 
 
 async def _last_action(

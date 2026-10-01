@@ -92,6 +92,10 @@ query items($pagination: Pagination, $filter: ItemFilter) {
         price
         status
         priorityPosition
+        priorityStatus {
+          id
+          price
+        }
       }
     }
   }

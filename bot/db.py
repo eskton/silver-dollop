@@ -78,6 +78,16 @@ class AutoReply(Base):
     text: Mapped[str] = mapped_column(Text)
 
 
+class RelistRule(Base):
+    """Правило отбора лотов для автовыставления: слово в названии или ссылка."""
+
+    __tablename__ = "relist_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    pattern: Mapped[str] = mapped_column(String(255))
+
+
 class DeliveryItem(Base):
     """Единица товара для автовыдачи, привязана к лоту по названию."""
 
@@ -110,7 +120,8 @@ class DealState(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
-    confirm_reminded: Mapped[bool] = mapped_column(Boolean, default=False)
+    confirm_reminded_at: Mapped[datetime | None] = mapped_column(DateTime)
+    confirm_reminders: Mapped[int] = mapped_column(Integer, default=0)
     review_reminded: Mapped[bool] = mapped_column(Boolean, default=False)
     review_thanked: Mapped[bool] = mapped_column(Boolean, default=False)
 
