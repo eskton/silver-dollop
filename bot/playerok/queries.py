@@ -55,6 +55,7 @@ query deals($pagination: Pagination, $filter: ItemDealFilter) {
         createdAt
         item {
           id
+          slug
           name
           price
         }
@@ -65,8 +66,52 @@ query deals($pagination: Pagination, $filter: ItemDealFilter) {
         chat {
           id
         }
+        review {
+          id
+          rating
+          text
+        }
       }
     }
+  }
+}
+"""
+
+# --- Лоты продавца, поднятие и перевыставление ---
+# Поднятие на Playerok платное (покупка статуса приоритета), поэтому в боте
+# есть суточный лимит. Название мутации и аргументы сверить в DevTools.
+
+MY_ITEMS = """
+query items($pagination: Pagination, $filter: ItemFilter) {
+  items(pagination: $pagination, filter: $filter) {
+    edges {
+      node {
+        id
+        slug
+        name
+        price
+        status
+        priorityPosition
+      }
+    }
+  }
+}
+"""
+
+INCREASE_ITEM_PRIORITY = """
+mutation increaseItemPriorityStatus($input: PublishItemInput!) {
+  increaseItemPriorityStatus(input: $input) {
+    id
+    priorityPosition
+  }
+}
+"""
+
+PUBLISH_ITEM = """
+mutation publishItem($input: PublishItemInput!) {
+  publishItem(input: $input) {
+    id
+    status
   }
 }
 """

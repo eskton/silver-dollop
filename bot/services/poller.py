@@ -13,6 +13,8 @@ from ..crypto import TokenCipher
 from ..db import SeenEvent, Seller, SessionFactory
 from ..keyboards import deal_kb, main_menu
 from ..playerok import AuthRequired, ChatPreview, Deal, PlayerokClient, PlayerokError
+from ..playerok.client import ACTIVE_SALE_STATUSES
+from . import automation
 from .sellers import disconnect_seller
 
 log = logging.getLogger(__name__)
@@ -77,16 +79,19 @@ async def sync_seller(
     if client is None:
         client = PlayerokClient(cipher.decrypt(seller.token_enc))
     try:
-        for deal in await client.my_sales(seller.playerok_id):
-            if not deal.id:
+        deals = await client.my_sales(seller.playerok_id)
+        for deal in deals:
+            if not deal.id or deal.status not in ACTIVE_SALE_STATUSES:
                 continue
             is_new = await _mark_seen(sessions, seller.tg_id, "deal", deal.id)
             if is_new and notify and seller.notify_deals:
                 await bot.send_message(
                     seller.tg_id, _format_deal(deal), reply_markup=deal_kb(deal.chat_id)
                 )
+        await automation.process_deals(bot, sessions, seller, client, deals, act=notify)
 
-        for chat in await client.chats(seller.playerok_id):
+        chats = await client.chats(seller.playerok_id)
+        for chat in chats:
             if chat.unread <= 0 or not chat.last_message_id:
                 continue
             if chat.last_author_id == seller.playerok_id:
@@ -96,6 +101,10 @@ async def sync_seller(
                 await bot.send_message(
                     seller.tg_id, _format_message(chat), reply_markup=deal_kb(chat.id)
                 )
+        await automation.process_chats(sessions, seller, client, chats, act=notify)
+
+        if notify:
+            await automation.process_items(bot, sessions, seller, client)
     finally:
         if own_client:
             await client.aclose()

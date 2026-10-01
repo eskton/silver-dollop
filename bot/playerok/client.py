@@ -54,24 +54,67 @@ class Viewer:
 class Deal:
     id: str
     status: str
+    item_id: str
+    item_slug: str
     item_name: str
     price: float | None
     buyer_id: str
     buyer_username: str
     chat_id: str | None
     created_at: str
+    review_rating: int | None = None
+    review_text: str = ""
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> "Deal":
+        rating = _get(raw, "review", "rating")
         return cls(
             id=str(_get(raw, "id", default="")),
             status=str(_get(raw, "status", default="")),
+            item_id=str(_get(raw, "item", "id", default="")),
+            item_slug=str(_get(raw, "item", "slug", default="")),
             item_name=str(_get(raw, "item", "name", default="товар")),
             price=_get(raw, "item", "price"),
             buyer_id=str(_get(raw, "user", "id", default="")),
             buyer_username=str(_get(raw, "user", "username", default="покупатель")),
             chat_id=_get(raw, "chat", "id"),
             created_at=str(_get(raw, "createdAt", default="")),
+            review_rating=int(rating) if isinstance(rating, (int, float)) else None,
+            review_text=str(_get(raw, "review", "text", default="") or ""),
+        )
+
+    @property
+    def item_url(self) -> str:
+        return f"{BASE_URL}/products/{self.item_slug or self.item_id}"
+
+    @property
+    def deal_url(self) -> str:
+        return f"{BASE_URL}/deal/{self.id}"
+
+    @property
+    def chat_url(self) -> str:
+        return f"{BASE_URL}/chats/{self.chat_id}" if self.chat_id else f"{BASE_URL}/chats"
+
+
+@dataclass(frozen=True)
+class Item:
+    id: str
+    slug: str
+    name: str
+    price: float | None
+    status: str
+    position: int | None
+
+    @classmethod
+    def from_raw(cls, raw: dict[str, Any]) -> "Item":
+        pos = _get(raw, "priorityPosition")
+        return cls(
+            id=str(_get(raw, "id", default="")),
+            slug=str(_get(raw, "slug", default="")),
+            name=str(_get(raw, "name", default="лот")),
+            price=_get(raw, "price"),
+            status=str(_get(raw, "status", default="")),
+            position=int(pos) if isinstance(pos, (int, float)) else None,
         )
 
 
@@ -197,21 +240,43 @@ class PlayerokClient:
     # ----- сделки -----
 
     async def my_sales(
-        self, user_id: str, statuses: tuple[str, ...] = ACTIVE_SALE_STATUSES, limit: int = 20
+        self, user_id: str, statuses: tuple[str, ...] | None = None, limit: int = 30
     ) -> list[Deal]:
+        """Продажи пользователя, свежие первыми. statuses=None — без фильтра по статусу."""
+        filt: dict[str, Any] = {"userId": user_id, "direction": "OUT"}
+        if statuses:
+            filt["status"] = list(statuses)
         data = await self._gql(
-            "deals",
-            q.DEALS,
-            {
-                "pagination": {"first": limit},
-                "filter": {"userId": user_id, "direction": "OUT", "status": list(statuses)},
-            },
+            "deals", q.DEALS, {"pagination": {"first": limit}, "filter": filt}
         )
         edges = _get(data, "deals", "edges", default=[]) or []
         return [Deal.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
 
     async def update_deal_status(self, deal_id: str, status: str) -> None:
         await self._gql("updateDeal", q.UPDATE_DEAL, {"input": {"id": deal_id, "status": status}})
+
+    async def confirm_deal(self, deal_id: str) -> None:
+        """Продавец отмечает заказ выполненным (выдан)."""
+        await self.update_deal_status(deal_id, "SENT")
+
+    # ----- лоты -----
+
+    async def my_items(self, user_id: str, limit: int = 100) -> list[Item]:
+        data = await self._gql(
+            "items",
+            q.MY_ITEMS,
+            {"pagination": {"first": limit}, "filter": {"userId": user_id}},
+        )
+        edges = _get(data, "items", "edges", default=[]) or []
+        return [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+
+    async def bump_item(self, item_id: str) -> None:
+        await self._gql(
+            "increaseItemPriorityStatus", q.INCREASE_ITEM_PRIORITY, {"input": {"itemId": item_id}}
+        )
+
+    async def publish_item(self, item_id: str) -> None:
+        await self._gql("publishItem", q.PUBLISH_ITEM, {"input": {"itemId": item_id}})
 
     # ----- чаты -----
 

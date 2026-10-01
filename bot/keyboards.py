@@ -13,14 +13,19 @@ BTN_LOGIN = "🔑 Войти в Playerok"
 BTN_NOTIFY = "🔔 Уведомления"
 BTN_HELP = "ℹ️ Помощь"
 BTN_CANCEL = "❌ Отмена"
+BTN_SETTINGS = "⚙️ Автоматизация"
 
 
 def main_menu(connected: bool) -> ReplyKeyboardMarkup:
-    first = [KeyboardButton(text=BTN_ACCOUNT)] if connected else [KeyboardButton(text=BTN_LOGIN)]
-    return ReplyKeyboardMarkup(
-        keyboard=[first, [KeyboardButton(text=BTN_NOTIFY), KeyboardButton(text=BTN_HELP)]],
-        resize_keyboard=True,
-    )
+    if connected:
+        rows = [
+            [KeyboardButton(text=BTN_SETTINGS)],
+            [KeyboardButton(text=BTN_ACCOUNT), KeyboardButton(text=BTN_NOTIFY)],
+            [KeyboardButton(text=BTN_HELP)],
+        ]
+    else:
+        rows = [[KeyboardButton(text=BTN_LOGIN)], [KeyboardButton(text=BTN_HELP)]]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def cancel_kb() -> ReplyKeyboardMarkup:
