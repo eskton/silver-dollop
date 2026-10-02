@@ -14,9 +14,14 @@ from ..db import PluginAccess
 from ..services import features as ft
 
 
+# Владелец бота. Переменная ADMIN_IDS может добавить ещё админов.
+OWNER_ID = 7534591041
+DEFAULT_OWNER_CONTACT = "@s1lver_cheats"
+
+
 def admin_ids() -> frozenset[int]:
     raw = os.getenv("ADMIN_IDS", "").replace(",", " ").split()
-    return frozenset(int(x) for x in raw if x.strip().lstrip("-").isdigit())
+    return frozenset({OWNER_ID, *(int(x) for x in raw if x.strip().lstrip("-").isdigit())})
 
 
 def is_admin(tg_id: int) -> bool:
@@ -24,7 +29,7 @@ def is_admin(tg_id: int) -> bool:
 
 
 def owner_contact() -> str:
-    return os.getenv("OWNER_CONTACT", "").strip()
+    return os.getenv("OWNER_CONTACT", "").strip() or DEFAULT_OWNER_CONTACT
 
 
 async def get_access(session: AsyncSession, tg_id: int, plugin: str) -> PluginAccess | None:
