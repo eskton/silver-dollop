@@ -25,7 +25,9 @@ from ..db import (
     SessionFactory,
 )
 from ..playerok import ChatPreview, Deal, Item, PlayerokClient, PlayerokError
+from ..crypto import TokenCipher
 from . import features as ft
+from . import stars as stars_svc
 from .notifications import notify
 
 log = logging.getLogger(__name__)
@@ -137,6 +139,10 @@ async def _process_deal(
     if cur == "PAID" and (is_new or prev != "PAID"):
         if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["greeting"]):
             await _say(client, deal.chat_id, await _tpl(session, seller, "greeting", deal))
+        if await stars_svc.on_paid(bot, session, seller, client, deal):
+            state.delivered = False  # выдача звёзд идёт своим путём, автоподтверждение не трогаем
+            state.status = cur
+            return
         if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["autodelivery"]):
             await _deliver(bot, session, seller, client, deal, state)
 
@@ -312,11 +318,13 @@ async def process_chats(
     chats: list[ChatPreview],
     *,
     act: bool,
+    bot: Bot | None = None,
+    cipher: TokenCipher | None = None,
 ) -> None:
     async with sessions() as session:
         for chat in chats:
             try:
-                await _process_chat(session, seller, client, chat, act=act)
+                await _process_chat(session, seller, client, chat, act=act, bot=bot, cipher=cipher)
             except PlayerokError as e:
                 log.warning("Чат %s продавца %s: %s", chat.id, seller.tg_id, e)
             except Exception:
@@ -325,7 +333,14 @@ async def process_chats(
 
 
 async def _process_chat(
-    session: AsyncSession, seller: Seller, client: PlayerokClient, chat: ChatPreview, *, act: bool
+    session: AsyncSession,
+    seller: Seller,
+    client: PlayerokClient,
+    chat: ChatPreview,
+    *,
+    act: bool,
+    bot: Bot | None = None,
+    cipher: TokenCipher | None = None,
 ) -> None:
     tg = seller.tg_id
     from_buyer = chat.last_message_id and chat.last_author_id != seller.playerok_id
@@ -347,6 +362,12 @@ async def _process_chat(
         return
 
     if is_new_message:
+        # Ждём @username для выдачи звёзд?
+        if bot is not None and cipher is not None and await stars_svc.on_buyer_message(
+            bot, session, seller, client, cipher, chat.id, chat.last_text
+        ):
+            state.ignore_sent_for = chat.last_message_id
+            return
         # Автоответчик по ключевым словам
         if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["autoresponder"]):
             text = chat.last_text.lower()

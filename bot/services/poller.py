@@ -106,7 +106,9 @@ async def sync_seller(
                         bot, session, seller.tg_id, "message", _format_message(chat),
                         reply_markup=deal_kb(chat.id),
                     )
-        await automation.process_chats(sessions, seller, client, chats, act=notify)
+        await automation.process_chats(
+            sessions, seller, client, chats, act=notify, bot=bot, cipher=cipher
+        )
 
         if notify:
             await automation.process_items(bot, sessions, seller, client)

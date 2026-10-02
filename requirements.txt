@@ -4,3 +4,4 @@ SQLAlchemy[asyncio]>=2.0
 aiosqlite>=0.20
 cryptography>=42
 python-dotenv>=1.0
+tonutils>=2.3

@@ -158,6 +158,43 @@ class ChatState(Base):
     offline_sent_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class StarsRule(Base):
+    """Правило: слово в названии лота → сколько звёзд выдавать."""
+
+    __tablename__ = "stars_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    pattern: Mapped[str] = mapped_column(String(255))
+    stars: Mapped[int] = mapped_column(Integer)
+
+
+class StarsOrder(Base):
+    """Заказ звёзд: от оплаты на Playerok до покупки на Fragment."""
+
+    __tablename__ = "stars_orders"
+    __table_args__ = (UniqueConstraint("seller_tg_id", "deal_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    deal_id: Mapped[str] = mapped_column(String(128))
+    chat_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    item_name: Mapped[str] = mapped_column(String(255), default="")
+    buyer: Mapped[str | None] = mapped_column(String(64))
+    stars: Mapped[int] = mapped_column(Integer)
+    # awaiting_username → processing → done | failed
+    status: Mapped[str] = mapped_column(String(32), default="awaiting_username")
+    username: Mapped[str | None] = mapped_column(String(64))
+    recipient_name: Mapped[str | None] = mapped_column(String(255))
+    fragment_req_id: Mapped[str | None] = mapped_column(String(128))
+    tx_hash: Mapped[str | None] = mapped_column(String(128))
+    cost_usdt: Mapped[float | None] = mapped_column(Float)
+    error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class ActionLog(Base):
     """Счётчики действий за сутки (лимит автоподнятия и т.п.)."""
 

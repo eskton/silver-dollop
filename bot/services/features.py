@@ -57,6 +57,10 @@ VARIABLES_HELP = (
     "<code>{Цена}</code> — цена лота\n"
     "<code>{Аккаунт}</code> — аккаунт продавца"
 )
+STARS_VARIABLES_HELP = (
+    "<code>{Звёзды}</code> — сколько звёзд в заказе\n"
+    "<code>{Юзернейм}</code> — @username получателя (только в тексте после выдачи)"
+)
 
 FEATURES: tuple[Feature, ...] = (
     Feature(
@@ -131,6 +135,41 @@ FEATURES: tuple[Feature, ...] = (
         ),
         special="autodelivery",
         default_enabled=True,
+    ),
+    Feature(
+        key="stars",
+        title="⭐ Звёзды через Fragment",
+        description="Автовыдача Telegram Stars: после оплаты бот спрашивает @username, "
+        "покупает звёзды на Fragment за USDT (сеть TON) с вашего кошелька и подтверждает заказ.",
+        templates=(
+            TemplateKind(
+                "stars_ask_username",
+                "запрос username",
+                "Спасибо за покупку, {Имя_Клиента}! Напишите ваш @username в Telegram, "
+                "на который отправить {Звёзды} ⭐ (профиль должен быть открытым).",
+            ),
+            TemplateKind(
+                "stars_bad_username",
+                "если username не найден",
+                "Не нашёл такого пользователя на Fragment. Проверьте @username и пришлите ещё раз.",
+            ),
+            TemplateKind(
+                "stars_done",
+                "после выдачи",
+                "Готово! {Звёзды} ⭐ отправлены на {Юзернейм}. Пожалуйста, подтвердите заказ 🙏",
+            ),
+            TemplateKind(
+                "stars_fail",
+                "если не получилось",
+                "Возникла заминка с автоматической выдачей, продавец уже уведомлён и выдаст вручную.",
+            ),
+        ),
+        params=(Param("stars_min_usdt", "Предупреждать, если USDT меньше", "USDT", 10, 0, 100000),),
+        toggles=(
+            ("stars_autoparse", "Брать число звёзд из названия лота", True),
+            ("stars_autoconfirm", "Подтверждать заказ после выдачи", True),
+        ),
+        special="stars",
     ),
     Feature(
         key="autoresponder",

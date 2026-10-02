@@ -109,6 +109,10 @@ async def render_feature(
         return await render_autoresponder(sessions, seller, feature)
     if feature.special == "relist":
         return await render_relist(sessions, seller, feature)
+    if feature.special == "stars":
+        from .stars import render_stars
+
+        return await render_stars(sessions, seller, feature)
 
     tg = seller.tg_id
     async with sessions() as session:
@@ -184,8 +188,9 @@ async def feature_cb(cb: CallbackQuery, state: FSMContext, sessions: SessionFact
         await state.set_state(EditText.text)
         await state.update_data(kind=arg, item_name="", feature=feature.key)
         await cb.answer()
+        extra = f"\n{ft.STARS_VARIABLES_HELP}" if arg.startswith("stars_") else ""
         await cb.message.answer(
-            f"Пришли новый текст ({ft.TEMPLATE_KINDS[arg].label}).\n\n{ft.VARIABLES_HELP}",
+            f"Пришли новый текст ({ft.TEMPLATE_KINDS[arg].label}).\n\n{ft.VARIABLES_HELP}{extra}",
             reply_markup=cancel_kb(),
         )
         return
