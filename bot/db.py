@@ -1,6 +1,18 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    inspect,
+    text,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -116,6 +128,11 @@ class DealState(Base):
     chat_id: Mapped[str | None] = mapped_column(String(128))
     item_name: Mapped[str] = mapped_column(String(255), default="")
     status: Mapped[str] = mapped_column(String(32), default="")
+    # Для аналитики: цена, покупатель, когда создан заказ на Playerok, оценка.
+    price: Mapped[float | None] = mapped_column(Float)
+    buyer: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime | None] = mapped_column(DateTime)
+    review_rating: Mapped[int | None] = mapped_column(Integer)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -157,8 +174,24 @@ class ActionLog(Base):
 SessionFactory = async_sessionmaker[AsyncSession]
 
 
+def _add_missing_columns(sync_conn) -> None:
+    """Мини-миграция: create_all не добавляет новые колонки в уже созданные
+    таблицы, поэтому досоздаём их сами (все новые колонки допускают NULL)."""
+    insp = inspect(sync_conn)
+    for table in Base.metadata.sorted_tables:
+        if not insp.has_table(table.name):
+            continue
+        existing = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in existing:
+                continue
+            col_type = col.type.compile(dialect=sync_conn.dialect)
+            sync_conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}"))
+
+
 async def init_db(db_url: str) -> SessionFactory:
     engine = create_async_engine(db_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)
     return async_sessionmaker(engine, expire_on_commit=False)

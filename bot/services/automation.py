@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import html
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from sqlalchemy import func, select
@@ -110,6 +110,7 @@ async def _process_deal(
         session.add(state)
     if state.chat_id is None and deal.chat_id:
         state.chat_id = deal.chat_id
+    _update_analytics(state, deal)
 
     prev, cur = state.status, deal.status
     if not act:
@@ -213,6 +214,32 @@ async def _process_deal(
                 await _say(client, deal.chat_id, await _tpl(session, seller, "review_reminder", deal))
 
     state.status = cur
+
+
+def _parse_dt(value: str) -> datetime | None:
+    """ISO-дата Playerok → naive UTC (как остальные даты в базе)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _update_analytics(state: DealState, deal: Deal) -> None:
+    if isinstance(deal.price, (int, float)):
+        state.price = float(deal.price)
+    if deal.buyer_username:
+        state.buyer = deal.buyer_username[:64]
+    if state.created_at is None:
+        state.created_at = _parse_dt(deal.created_at) or state.first_seen_at or _now()
+    if deal.review_rating is not None:
+        state.review_rating = deal.review_rating
+    if deal.item_name:
+        state.item_name = deal.item_name
 
 
 async def _deliver(

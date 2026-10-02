@@ -14,6 +14,7 @@ BTN_NOTIFY = "🔔 Уведомления"
 BTN_HELP = "ℹ️ Помощь"
 BTN_CANCEL = "❌ Отмена"
 BTN_SETTINGS = "⚙️ Автоматизация"
+BTN_STATS = "📊 Аналитика"
 
 
 def is_cancel(text: str | None) -> bool:
@@ -24,7 +25,7 @@ def is_cancel(text: str | None) -> bool:
 def main_menu(connected: bool) -> ReplyKeyboardMarkup:
     if connected:
         rows = [
-            [KeyboardButton(text=BTN_SETTINGS)],
+            [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_STATS)],
             [KeyboardButton(text=BTN_ACCOUNT), KeyboardButton(text=BTN_NOTIFY)],
             [KeyboardButton(text=BTN_HELP)],
         ]

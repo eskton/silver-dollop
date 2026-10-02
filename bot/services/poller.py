@@ -79,7 +79,8 @@ async def sync_seller(
     if client is None:
         client = PlayerokClient(cipher.decrypt(seller.token_enc))
     try:
-        deals = await client.my_sales(seller.playerok_id)
+        # При первом проходе после входа берём больше истории — для аналитики.
+        deals = await client.my_sales(seller.playerok_id, limit=30 if notify else 100)
         for deal in deals:
             if not deal.id or deal.status not in ACTIVE_SALE_STATUSES:
                 continue
