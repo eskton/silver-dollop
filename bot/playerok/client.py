@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -163,6 +164,52 @@ class RawResponse:
 # Транспорт: (тело запроса, текущий токен) → ответ. Подменяется в тестах.
 Transport = Callable[[dict[str, Any], "str | None"], Awaitable[RawResponse]]
 
+# Схема Playerok нам точно не известна: если сервер отвечает «нет такого поля»,
+# поле убирается из запроса, запрос повторяется, а исправленный текст кэшируется.
+UNKNOWN_FIELD_RE = re.compile(r'Cannot query field "([A-Za-z_][A-Za-z0-9_]*)"')
+MAX_FIELD_RETRIES = 12
+PATCHED_QUERIES: dict[str, str] = {}
+REMOVED_FIELDS: dict[str, list[str]] = {}
+
+
+def strip_field(query: str, field: str) -> str:
+    """Убирает из GraphQL-запроса все поля `field` вместе с их аргументами
+    и вложенным блоком. Корневое поле операции не трогает."""
+    pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(field) + r"(?![A-Za-z0-9_])")
+    out = query
+    pos = 0
+    while True:
+        m = pattern.search(out, pos)
+        if not m:
+            return out
+        start, end = m.start(), m.end()
+        # Пропускаем аргументы (...) и вложенный блок {...}
+        i = end
+        for opener, closer in (("(", ")"), ("{", "}")):
+            j = i
+            while j < len(out) and out[j] in " \t\r\n":
+                j += 1
+            if j < len(out) and out[j] == opener:
+                depth = 0
+                while j < len(out):
+                    if out[j] == opener:
+                        depth += 1
+                    elif out[j] == closer:
+                        depth -= 1
+                        if depth == 0:
+                            j += 1
+                            break
+                    j += 1
+                i = j
+        # Поле-корень (сразу после `query x(...) {`) или алиас/название операции — не трогаем
+        before = out[:start].rstrip()
+        if before.endswith(("query", "mutation")) or before.endswith("{") and before.count("{") == 1:
+            pos = end
+            continue
+        out = out[:start] + out[i:]
+        pos = start
+
+
 HEADERS = {
     "Accept": "*/*",
     "Content-Type": "application/json",
@@ -243,8 +290,15 @@ class PlayerokClient:
     # ----- низкий уровень -----
 
     async def _gql(
-        self, operation: str, query: str, variables: dict[str, Any] | None = None
+        self,
+        operation: str,
+        query: str,
+        variables: dict[str, Any] | None = None,
+        *,
+        _retries: int = 0,
     ) -> dict[str, Any]:
+        # Если раньше из запроса уже выкидывали неизвестные поля — берём исправленный.
+        query = PATCHED_QUERIES.get(operation, query)
         body = {"operationName": operation, "query": query, "variables": variables or {}}
         send = self._transport or self._curl_post
         try:
@@ -275,6 +329,15 @@ class PlayerokClient:
             code = str(_get(first, "extensions", "code", default="")).upper()
             if code in ("UNAUTHENTICATED", "FORBIDDEN") or "auth" in message.lower():
                 raise AuthRequired(message)
+            unknown = UNKNOWN_FIELD_RE.search(message)
+            if unknown and _retries < MAX_FIELD_RETRIES:
+                field = unknown.group(1)
+                patched = strip_field(query, field)
+                if patched != query:
+                    log.warning("Playerok %s: нет поля %r, убираю его из запроса", operation, field)
+                    REMOVED_FIELDS.setdefault(operation, []).append(field)
+                    PATCHED_QUERIES[operation] = patched
+                    return await self._gql(operation, patched, variables, _retries=_retries + 1)
             raise PlayerokError(message)
 
         # После входа сайт отдаёт токен сессии в Set-Cookie.

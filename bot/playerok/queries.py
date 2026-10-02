@@ -70,11 +70,6 @@ query deals($pagination: Pagination, $filter: ItemDealFilter) {
         chat {
           id
         }
-        review {
-          id
-          rating
-          text
-        }
       }
     }
   }
