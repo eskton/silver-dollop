@@ -441,14 +441,43 @@ class PlayerokClient:
 
     # ----- лоты -----
 
+    # Playerok отвечал «Access denied» на фильтр {userId}. Форму фильтра
+    # заранее не знаем — перебираем варианты и запоминаем рабочий.
+    _items_filter: dict[str, Any] | None = None
+
+    def _items_filter_variants(self, user_id: str) -> list[dict[str, Any]]:
+        statuses = ["APPROVED", "SOLD", "EXPIRED", "DRAFT"]
+        return [
+            {"userId": user_id},
+            {"userId": user_id, "status": statuses},
+            {"sellerId": user_id},
+            {"user": user_id},
+            {"ownerId": user_id},
+            {},
+        ]
+
     async def my_items(self, user_id: str, limit: int = 100) -> list[Item]:
-        data = await self._gql(
-            "items",
-            q.MY_ITEMS,
-            {"pagination": {"first": limit}, "filter": {"userId": user_id}},
+        variants = (
+            [PlayerokClient._items_filter]
+            if PlayerokClient._items_filter is not None
+            else self._items_filter_variants(user_id)
         )
-        edges = _get(data, "items", "edges", default=[]) or []
-        return [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+        last: Exception | None = None
+        for filt in variants:
+            try:
+                data = await self._gql(
+                    "items", q.MY_ITEMS, {"pagination": {"first": limit}, "filter": filt}
+                )
+            except (AuthRequired, PlayerokError) as e:
+                # Любой вид фильтра может не подойти — пробуем следующий.
+                last = e
+                continue
+            PlayerokClient._items_filter = filt  # запомнили рабочий
+            edges = _get(data, "items", "edges", default=[]) or []
+            return [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+        if last is not None:
+            raise last
+        return []
 
     async def bump_item(self, item_id: str) -> None:
         await self._gql(
