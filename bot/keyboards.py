@@ -16,6 +16,11 @@ BTN_CANCEL = "❌ Отмена"
 BTN_SETTINGS = "⚙️ Автоматизация"
 
 
+def is_cancel(text: str | None) -> bool:
+    """Кнопка «Отмена» или то же слово, набранное вручную."""
+    return (text or "").replace("❌", "").strip().lower() in ("отмена", "cancel")
+
+
 def main_menu(connected: bool) -> ReplyKeyboardMarkup:
     if connected:
         rows = [

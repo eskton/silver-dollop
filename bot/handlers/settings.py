@@ -15,7 +15,7 @@ from sqlalchemy import delete, func, select
 
 from ..db import AutoReply, DeliveryItem, RelistRule, Seller, SessionFactory, Template
 from ..crypto import TokenCipher
-from ..keyboards import BTN_CANCEL, BTN_SETTINGS, cancel_kb, main_menu
+from ..keyboards import is_cancel, BTN_SETTINGS, cancel_kb, main_menu
 from ..playerok import AuthRequired, PlayerokClient, PlayerokError
 from ..services import features as ft
 from ..services.automation import relist_candidates
@@ -231,7 +231,7 @@ async def _finish(message: Message, state: FSMContext, sessions: SessionFactory,
     await message.answer(text, reply_markup=kb)
 
 
-@router.message(StateFilter(EditText, EditParam, ItemRule, AddStock, AddReply, AddRelistRule), F.text == BTN_CANCEL)
+@router.message(StateFilter(EditText, EditParam, ItemRule, AddStock, AddReply, AddRelistRule), F.text.func(is_cancel))
 @router.message(StateFilter(EditText, EditParam, ItemRule, AddStock, AddReply, AddRelistRule), Command("cancel"))
 async def cancel_edit(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
     await state.clear()

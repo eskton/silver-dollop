@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 
 from ..crypto import TokenCipher
 from ..db import SessionFactory
-from ..keyboards import BTN_CANCEL, cancel_kb, main_menu
+from ..keyboards import is_cancel, cancel_kb, main_menu
 from ..playerok import AuthRequired, PlayerokClient, PlayerokError
 from ..services.sellers import disconnect_seller, get_or_create_seller
 
@@ -30,7 +30,7 @@ async def ask_reply(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.message.answer("Напиши ответ покупателю:", reply_markup=cancel_kb())
 
 
-@router.message(StateFilter(Reply), F.text == BTN_CANCEL)
+@router.message(StateFilter(Reply), F.text.func(is_cancel))
 @router.message(StateFilter(Reply), Command("cancel"))
 async def cancel_reply(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
     await state.clear()

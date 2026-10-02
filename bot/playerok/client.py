@@ -7,19 +7,18 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
-
-import httpx
 
 from . import queries as q
 from .errors import AuthRequired, PlayerokError
 
+log = logging.getLogger(__name__)
+
 BASE_URL = "https://playerok.com"
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
 # Статусы сделок, по которым продавцу надо что-то сделать.
 ACTIVE_SALE_STATUSES = ("PAID", "SENT")
 
@@ -153,33 +152,57 @@ class ChatPreview:
         )
 
 
-class PlayerokClient:
-    def __init__(self, token: str | None = None, timeout: float = 20.0) -> None:
-        self._token = token
-        self._http = httpx.AsyncClient(
-            base_url=BASE_URL,
-            timeout=timeout,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Origin": BASE_URL,
-                "Referer": BASE_URL + "/",
-                "apollo-require-preflight": "true",
-            },
-        )
-        if token:
-            self._set_cookie(token)
+@dataclass(frozen=True)
+class RawResponse:
+    status: int
+    text: str
+    token: str | None  # значение cookie `token` из Set-Cookie, если пришло
 
-    def _set_cookie(self, token: str) -> None:
-        self._http.cookies.set("token", token, domain="playerok.com", path="/")
+
+# Транспорт: (тело запроса, текущий токен) → ответ. Подменяется в тестах.
+Transport = Callable[[dict[str, Any], "str | None"], Awaitable[RawResponse]]
+
+HEADERS = {
+    "Accept": "*/*",
+    "Content-Type": "application/json",
+    "Origin": BASE_URL,
+    "Referer": BASE_URL + "/",
+    "apollo-require-preflight": "true",
+}
+
+
+class PlayerokClient:
+    def __init__(
+        self, token: str | None = None, timeout: float = 20.0, transport: Transport | None = None
+    ) -> None:
+        self._token = token
+        self._timeout = timeout
+        self._transport = transport
+        self._session: Any = None
+
+    async def _curl_post(self, body: dict[str, Any], token: str | None) -> RawResponse:
+        # curl_cffi повторяет TLS-отпечаток настоящего Chrome: без этого защита
+        # Playerok от ботов отвечает 403 ещё до обработки запроса.
+        from curl_cffi.requests import AsyncSession
+
+        if self._session is None:
+            self._session = AsyncSession(impersonate="chrome", timeout=self._timeout)
+        resp = await self._session.post(
+            BASE_URL + "/graphql",
+            json=body,
+            headers=HEADERS,
+            cookies={"token": token} if token else None,
+        )
+        return RawResponse(resp.status_code, resp.text, resp.cookies.get("token"))
 
     @property
     def token(self) -> str | None:
         return self._token
 
     async def aclose(self) -> None:
-        await self._http.aclose()
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
 
     async def __aenter__(self) -> "PlayerokClient":
         return self
@@ -192,20 +215,28 @@ class PlayerokClient:
     async def _gql(
         self, operation: str, query: str, variables: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        body = {"operationName": operation, "query": query, "variables": variables or {}}
+        send = self._transport or self._curl_post
         try:
-            resp = await self._http.post(
-                "/graphql",
-                json={"operationName": operation, "query": query, "variables": variables or {}},
-            )
-        except httpx.HTTPError as e:
+            resp = await send(body, self._token)
+        except Exception as e:  # сеть, таймаут, TLS
             raise PlayerokError(f"Playerok недоступен: {e.__class__.__name__}") from e
 
-        if resp.status_code in (401, 403):
-            raise AuthRequired(f"HTTP {resp.status_code}")
         try:
-            payload = resp.json()
-        except ValueError as e:
-            raise PlayerokError(f"Playerok вернул не JSON (HTTP {resp.status_code})") from e
+            payload = json.loads(resp.text)
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            # HTML вместо JSON — это страница защиты от ботов, а не истёкшая сессия.
+            snippet = " ".join(resp.text.split())[:300]
+            log.warning("Playerok %s: HTTP %s, не JSON: %s", operation, resp.status, snippet)
+            if resp.status in (403, 429, 503):
+                raise PlayerokError(
+                    f"защита Playerok заблокировала запрос (HTTP {resp.status})"
+                )
+            raise PlayerokError(f"Playerok вернул не JSON (HTTP {resp.status})")
+        if resp.status == 401:
+            raise AuthRequired("HTTP 401")
 
         errors = payload.get("errors") or []
         if errors:
@@ -216,11 +247,9 @@ class PlayerokClient:
                 raise AuthRequired(message)
             raise PlayerokError(message)
 
-        # После входа сайт отдаёт токен сессии в Set-Cookie; httpx сам кладёт
-        # его в cookie-хранилище клиента, нам остаётся только запомнить.
-        new_token = resp.cookies.get("token")
-        if new_token:
-            self._token = new_token
+        # После входа сайт отдаёт токен сессии в Set-Cookie.
+        if resp.token:
+            self._token = resp.token
         return payload.get("data") or {}
 
     # ----- авторизация -----

@@ -12,7 +12,7 @@ from aiogram.types import Message
 
 from ..crypto import TokenCipher
 from ..db import SessionFactory
-from ..keyboards import BTN_CANCEL, BTN_LOGIN, cancel_kb, main_menu
+from ..keyboards import is_cancel, BTN_LOGIN, cancel_kb, main_menu
 from ..playerok import PlayerokClient, PlayerokError
 from ..services.poller import sync_seller
 from ..services.sellers import get_or_create_seller
@@ -39,7 +39,7 @@ async def _drop_pending(tg_id: int) -> None:
         await client.aclose()
 
 
-@router.message(StateFilter(Login), F.text == BTN_CANCEL)
+@router.message(StateFilter(Login), F.text.func(is_cancel))
 @router.message(StateFilter(Login), Command("cancel"))
 async def cancel_login(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
     await state.clear()
