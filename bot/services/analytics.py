@@ -161,7 +161,10 @@ async def build_report(session: AsyncSession, tg_id: int, now: datetime | None =
 
     stock = (
         await session.execute(
-            select(DeliveryItem.item_name, func.sum(DeliveryItem.used_deal_id.is_(None)))
+            select(
+                func.max(DeliveryItem.item_name),
+                func.count(DeliveryItem.id).filter(DeliveryItem.used_deal_id.is_(None)),
+            )
             .where(DeliveryItem.seller_tg_id == tg_id)
             .group_by(DeliveryItem.item_key)
         )

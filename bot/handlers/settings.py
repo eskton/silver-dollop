@@ -311,8 +311,8 @@ async def render_autodelivery(
         intro = await ft.get_template(session, tg, "delivery_msg")
         rows_db = await session.execute(
             select(
-                DeliveryItem.item_name,
-                func.sum(DeliveryItem.used_deal_id.is_(None)),
+                func.max(DeliveryItem.item_name),
+                func.count(DeliveryItem.id).filter(DeliveryItem.used_deal_id.is_(None)),
                 func.count(DeliveryItem.id),
             )
             .where(DeliveryItem.seller_tg_id == tg)
@@ -337,14 +337,120 @@ async def render_autodelivery(
         lines += [f"• {html.escape(n)} — осталось {free} из {total}" for n, free, total in lots]
     else:
         lines.append("<i>Пока пусто</i>")
+    lines += ["", "Нажми на лот, чтобы посмотреть остаток и управлять товарами."]
     rows = [
         [_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")],
         [_btn("➕ Добавить товары", "ad:add")],
         [_btn("✏️ Текст перед товаром", f"f:{feature.key}:e:delivery_msg")],
     ]
-    rows += [[_btn(f"🗑 Очистить: {n[:28]}", f"ad:clear:{_h(n)}")] for n, _, _ in lots]
+    rows += [[_btn(f"📦 {n[:24]} — {free}/{total}", f"ad:lot:{_h(n)}")] for n, free, total in lots]
     rows.append([_btn("‹ Назад", "st")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _mask(content: str) -> str:
+    """Короткий товар показываем целиком, длинный — с середины скрываем."""
+    c = content.strip()
+    if len(c) <= 40:
+        return c
+    return c[:30] + "…" + c[-6:]
+
+
+async def _lot_name_by_hash(session, tg: int, h: str) -> tuple[str, str] | None:
+    rows = await session.execute(
+        select(DeliveryItem.item_name, DeliveryItem.item_key)
+        .where(DeliveryItem.seller_tg_id == tg)
+        .distinct()
+    )
+    for name, key in rows:
+        if _h(key) == h:
+            return name, key
+    return None
+
+
+async def render_lot_detail(
+    sessions: SessionFactory, tg: int, h: str
+) -> tuple[str, InlineKeyboardMarkup]:
+    async with sessions() as session:
+        found = await _lot_name_by_hash(session, tg, h)
+        if found is None:
+            return "Лот не найден или пуст.", InlineKeyboardMarkup(
+                inline_keyboard=[[_btn("‹ Назад", "f:autodelivery")]]
+            )
+        name, key = found
+        free = list(
+            await session.scalars(
+                select(DeliveryItem)
+                .where(
+                    DeliveryItem.seller_tg_id == tg,
+                    DeliveryItem.item_key == key,
+                    DeliveryItem.used_deal_id.is_(None),
+                )
+                .order_by(DeliveryItem.id)
+            )
+        )
+        used = await session.scalar(
+            select(func.count(DeliveryItem.id)).where(
+                DeliveryItem.seller_tg_id == tg,
+                DeliveryItem.item_key == key,
+                DeliveryItem.used_deal_id.is_not(None),
+            )
+        )
+    lines = [
+        f"📦 <b>{html.escape(name)}</b>",
+        "",
+        f"<b>Свободно:</b> {len(free)}  ·  <b>Выдано:</b> {used or 0}",
+        "",
+        "<b>Товары в запасе:</b>",
+    ]
+    lines += [f"{i}. <code>{html.escape(_mask(item.content))}</code>" for i, item in enumerate(free, 1)]
+    if not free:
+        lines.append("<i>пусто — добавь новые</i>")
+    rows = [
+        [_btn("➕ Добавить к этому лоту", f"ad:addto:{h}")],
+        [_btn("🗑 Очистить весь запас", f"ad:clear:{h}")],
+    ]
+    rows += [[_btn(f"❌ Удалить №{i}", f"ad:rm:{item.id}")] for i, item in enumerate(free[:15], 1)]
+    rows.append([_btn("‹ К автовыдаче", "f:autodelivery")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("ad:lot:"))
+async def lot_detail(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    text, kb = await render_lot_detail(sessions, cb.from_user.id, cb.data.split(":")[2])
+    await _show(cb, text, kb)
+
+
+@router.callback_query(F.data.startswith("ad:addto:"))
+async def stock_addto(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    h = cb.data.split(":")[2]
+    async with sessions() as session:
+        found = await _lot_name_by_hash(session, cb.from_user.id, h)
+    if found is None:
+        await cb.answer("Лот не найден", show_alert=True)
+        return
+    await state.set_state(AddStock.items)
+    await state.update_data(feature="autodelivery", lot=found[0])
+    await cb.answer()
+    await cb.message.answer(
+        f"Пришли товары для «{html.escape(found[0])}», по одному на строку.",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("ad:rm:"))
+async def stock_remove_one(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    item_id = int(cb.data.split(":")[2])
+    async with sessions() as session:
+        item = await session.get(DeliveryItem, item_id)
+        if item is None or item.seller_tg_id != cb.from_user.id or item.used_deal_id is not None:
+            await cb.answer("Товар уже удалён или выдан", show_alert=True)
+            return
+        h = _h(item.item_key)
+        await session.delete(item)
+        await session.commit()
+    text, kb = await render_lot_detail(sessions, cb.from_user.id, h)
+    await _show(cb, text, kb)
 
 
 @router.callback_query(F.data == "ad:add")
@@ -402,6 +508,7 @@ async def stock_clear(cb: CallbackQuery, sessions: SessionFactory) -> None:
                 )
         await session.commit()
     await _refresh(cb, sessions, ft.FEATURE_BY_KEY["autodelivery"])
+    await cb.answer("Запас очищен")
 
 
 # ===================== автоответчик =====================
