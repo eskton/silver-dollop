@@ -67,7 +67,11 @@ async def notify(
         return False
     try:
         await bot.send_message(
-            tg_id, text, reply_markup=reply_markup, disable_notification=not sound
+            tg_id,
+            text,
+            reply_markup=reply_markup,
+            disable_notification=not sound,
+            disable_web_page_preview=True,
         )
         return True
     except TelegramAPIError as e:  # продавец заблокировал бота и т.п.

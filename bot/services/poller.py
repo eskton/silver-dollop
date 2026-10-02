@@ -5,7 +5,9 @@ import html
 import logging
 
 from aiogram import Bot
-from sqlalchemy import select
+from datetime import datetime
+
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from ..config import Settings
@@ -86,9 +88,12 @@ async def sync_seller(
                 continue
             is_new = await _mark_seen(sessions, seller.tg_id, "deal", deal.id)
             if is_new and notify:
+                number = await _daily_order_number(sessions, seller.tg_id)
+                account = seller.playerok_username or "—"
                 async with sessions() as session:
                     await notifications.notify(
-                        bot, session, seller.tg_id, "deal", _format_deal(deal),
+                        bot, session, seller.tg_id, "deal",
+                        _format_deal(deal, account, number),
                         reply_markup=deal_kb(deal.chat_id),
                     )
         await automation.process_deals(bot, sessions, seller, client, deals, act=notify)
@@ -129,20 +134,46 @@ async def _mark_seen(sessions: SessionFactory, tg_id: int, kind: str, external_i
         return True
 
 
-def _format_deal(deal: Deal) -> str:
+async def _daily_order_number(sessions: SessionFactory, tg_id: int) -> int:
+    """Какой это по счёту заказ за сегодня (текущий уже записан в SeenEvent)."""
+    since = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    async with sessions() as session:
+        n = await session.scalar(
+            select(func.count(SeenEvent.id)).where(
+                SeenEvent.seller_tg_id == tg_id,
+                SeenEvent.kind == "deal",
+                SeenEvent.created_at >= since,
+            )
+        )
+    return int(n or 1)
+
+
+def _link(url: str, text: str) -> str:
+    return f'<a href="{url}">{text}</a>'
+
+
+def _format_deal(deal: Deal, account: str, number: int) -> str:
     price = f"{deal.price:g} ₽" if isinstance(deal.price, (int, float)) else "—"
-    status = STATUS_RU.get(deal.status, deal.status.lower() or "—")
-    return (
-        "🛒 <b>Новый заказ</b>\n"
-        f"Товар: {html.escape(deal.item_name)}\n"
-        f"Цена: {price}\n"
-        f"Покупатель: {html.escape(deal.buyer_username)}\n"
-        f"Статус: {status}"
-    )
+    lines = [
+        f"💰 <b>Заказ №{number} за сегодня для {html.escape(account)}</b>",
+        "",
+        f"<b>Название товара:</b> {_link(deal.item_url, html.escape(deal.item_name))}",
+        f"<b>Цена:</b> {price}",
+        f"<b>Заказ:</b> {_link(deal.deal_url, 'Открыть заказ')}",
+    ]
+    if deal.chat_id:
+        lines.append(f"<b>Ссылка на чат:</b> {_link(deal.chat_url, 'Открыть чат')}")
+    lines.append(f"<b>Аккаунт покупателя:</b> {html.escape(deal.buyer_username)}")
+    return "\n".join(lines)
 
 
 def _format_message(chat: ChatPreview) -> str:
     text = chat.last_text.strip() or "(без текста)"
     if len(text) > 1500:
         text = text[:1500] + "…"
-    return f"💬 <b>{html.escape(chat.last_author_username)}</b>:\n{html.escape(text)}"
+    chat_url = f"https://playerok.com/chats/{chat.id}"
+    return (
+        f"✉️ <b>Новое сообщение от {html.escape(chat.last_author_username)}</b>\n\n"
+        f"{html.escape(text)}\n\n"
+        f"<b>Ссылка на чат:</b> {_link(chat_url, 'Открыть чат')}"
+    )
