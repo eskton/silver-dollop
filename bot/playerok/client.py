@@ -167,6 +167,15 @@ Transport = Callable[[dict[str, Any], "str | None"], Awaitable[RawResponse]]
 # Схема Playerok нам точно не известна: если сервер отвечает «нет такого поля»,
 # поле убирается из запроса, запрос повторяется, а исправленный текст кэшируется.
 UNKNOWN_FIELD_RE = re.compile(r'Cannot query field "([A-Za-z_][A-Za-z0-9_]*)"')
+# Variable "$filter" of type "ItemDealFilter" used in position expecting type "ItemDealFilter!"
+VAR_TYPE_RE = re.compile(
+    r'Variable "\$([A-Za-z_][A-Za-z0-9_]*)" of type "([^"]+)" used in position expecting type "([^"]+)"'
+)
+
+
+def fix_variable_type(query: str, name: str, old: str, new: str) -> str:
+    """Меняет тип переменной в объявлении операции: `$name: old` → `$name: new`."""
+    return re.sub(r"(\$" + re.escape(name) + r"\s*:\s*)" + re.escape(old) + r"(?![A-Za-z0-9_!\]])", r"\g<1>" + new, query, count=1)
 MAX_FIELD_RETRIES = 12
 PATCHED_QUERIES: dict[str, str] = {}
 REMOVED_FIELDS: dict[str, list[str]] = {}
@@ -329,6 +338,15 @@ class PlayerokClient:
             code = str(_get(first, "extensions", "code", default="")).upper()
             if code in ("UNAUTHENTICATED", "FORBIDDEN") or "auth" in message.lower():
                 raise AuthRequired(message)
+            var_type = VAR_TYPE_RE.search(message)
+            if var_type and _retries < MAX_FIELD_RETRIES:
+                name, old, new = var_type.groups()
+                patched = fix_variable_type(query, name, old, new)
+                if patched != query:
+                    log.warning("Playerok %s: тип $%s %s → %s", operation, name, old, new)
+                    REMOVED_FIELDS.setdefault(operation, []).append(f"${name}: {old} -> {new}")
+                    PATCHED_QUERIES[operation] = patched
+                    return await self._gql(operation, patched, variables, _retries=_retries + 1)
             unknown = UNKNOWN_FIELD_RE.search(message)
             if unknown and _retries < MAX_FIELD_RETRIES:
                 field = unknown.group(1)

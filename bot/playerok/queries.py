@@ -45,7 +45,7 @@ query viewer {
 # --- Сделки (продажи текущего пользователя) ---
 
 DEALS = """
-query deals($pagination: Pagination, $filter: ItemDealFilter) {
+query deals($pagination: Pagination, $filter: ItemDealFilter!) {
   deals(pagination: $pagination, filter: $filter) {
     pageInfo {
       hasNextPage
