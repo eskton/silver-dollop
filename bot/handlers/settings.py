@@ -508,7 +508,7 @@ async def render_relist(
     rows += toggle_rows
     rows.append([_btn("➕ Добавить правило (слово/ссылка)", "rl:add")])
     rows += [[_btn(f"🗑 {r.pattern[:30]}", f"rl:del:{r.id}")] for r in rules]
-    rows.append([_btn("👁 Показать, что попадёт под восстановление", "rl:preview")])
+    rows.append([_btn("👁 Показать и восстановить вручную", "rl:preview")])
     rows.append([_btn("‹ Назад", "st")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -542,26 +542,100 @@ async def relist_rule_del(cb: CallbackQuery, sessions: SessionFactory) -> None:
     await _refresh(cb, sessions, ft.FEATURE_BY_KEY["relist"])
 
 
+async def _fetch_candidates(sessions: SessionFactory, seller, cipher: TokenCipher):
+    """Возвращает (список лотов-кандидатов, текст ошибки или None)."""
+    try:
+        async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+            items = await client.my_items(seller.playerok_id or "")
+    except AuthRequired as e:
+        return [], f"Playerok не отдал лоты (похоже на проблему доступа): {e}"
+    except PlayerokError as e:
+        return [], str(e)
+    async with sessions() as session:
+        return await relist_candidates(session, seller.tg_id, items), None
+
+
 @router.callback_query(F.data == "rl:preview")
 async def relist_preview(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
     seller = await _seller(sessions, cb)
     if not seller.is_connected:
         await cb.answer("Аккаунт не подключён", show_alert=True)
         return
-    try:
-        async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
-            items = await client.my_items(seller.playerok_id or "")
-    except AuthRequired:
-        await cb.answer("Сессия истекла, войди заново", show_alert=True)
+    await cb.answer("Загружаю лоты…")
+    candidates, error = await _fetch_candidates(sessions, seller, cipher)
+    if error:
+        await cb.message.answer(
+            "⚠️ Не удалось получить лоты с Playerok:\n"
+            f"<code>{html.escape(error)}</code>\n\n"
+            "Это не выкидывает вас из аккаунта — продажи и чаты работают. "
+            "Если повторяется, пришлите этот текст разработчику."
+        )
         return
-    except PlayerokError as e:
-        await cb.answer(f"Ошибка Playerok: {e}"[:200], show_alert=True)
-        return
-    async with sessions() as session:
-        candidates = await relist_candidates(session, seller.tg_id, items)
-    await cb.answer()
     if not candidates:
         await cb.message.answer("Сейчас под восстановление ничего не попадает.")
         return
-    lines = [f"• {html.escape(i.name)} — {i.status.lower()}" + (" (платно)" if i.is_paid_relist else "") for i in candidates[:50]]
-    await cb.message.answer("Под восстановление попадут:\n" + "\n".join(lines))
+    lines = ["<b>Под восстановление попадут:</b>", ""]
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in candidates[:20]:
+        paid = " 💸платно" if i.is_paid_relist else ""
+        lines.append(f"• {html.escape(i.name)} — {i.status.lower()}{paid}")
+        rows.append([_btn(f"♻️ {i.name[:28]}", f"rl:do:{i.id}")])
+    if len(candidates) > 1:
+        rows.insert(0, [_btn(f"♻️ Восстановить все ({len(candidates)})", "rl:all")])
+    rows.append([_btn("‹ Назад", "f:relist")])
+    await cb.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+async def _restore(client: PlayerokClient, sessions: SessionFactory, tg: int, item_id: str, name: str) -> str:
+    from ..db import ActionLog
+
+    try:
+        await client.publish_item(item_id)
+    except (AuthRequired, PlayerokError) as e:
+        return f"❌ {html.escape(name)}: {html.escape(str(e))[:150]}"
+    async with sessions() as session:
+        session.add(ActionLog(seller_tg_id=tg, kind="relist", target=item_id))
+        await session.commit()
+    return f"✅ {html.escape(name)}"
+
+
+@router.callback_query(F.data.startswith("rl:do:"))
+async def relist_do(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    item_id = cb.data.split(":", 2)[2]
+    seller = await _seller(sessions, cb)
+    if not seller.is_connected:
+        await cb.answer("Аккаунт не подключён", show_alert=True)
+        return
+    await cb.answer("Восстанавливаю…")
+    candidates, error = await _fetch_candidates(sessions, seller, cipher)
+    if error:
+        await cb.message.answer(f"⚠️ {html.escape(error)}")
+        return
+    item = next((i for i in candidates if i.id == item_id), None)
+    if item is None:
+        await cb.message.answer("Этот лот уже не в списке на восстановление.")
+        return
+    async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+        result = await _restore(client, sessions, seller.tg_id, item.id, item.name)
+    await cb.message.answer(result)
+
+
+@router.callback_query(F.data == "rl:all")
+async def relist_all(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    seller = await _seller(sessions, cb)
+    if not seller.is_connected:
+        await cb.answer("Аккаунт не подключён", show_alert=True)
+        return
+    await cb.answer("Восстанавливаю все…")
+    candidates, error = await _fetch_candidates(sessions, seller, cipher)
+    if error:
+        await cb.message.answer(f"⚠️ {html.escape(error)}")
+        return
+    if not candidates:
+        await cb.message.answer("Восстанавливать нечего.")
+        return
+    results = []
+    async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+        for item in candidates[:30]:
+            results.append(await _restore(client, sessions, seller.tg_id, item.id, item.name))
+    await cb.message.answer("\n".join(results))

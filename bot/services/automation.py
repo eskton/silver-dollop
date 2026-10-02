@@ -24,7 +24,7 @@ from ..db import (
     Seller,
     SessionFactory,
 )
-from ..playerok import ChatPreview, Deal, Item, PlayerokClient, PlayerokError
+from ..playerok import AuthRequired, ChatPreview, Deal, Item, PlayerokClient, PlayerokError
 from ..crypto import TokenCipher
 from . import features as ft
 from ..plugins.stars import service as stars_svc
@@ -438,7 +438,13 @@ async def process_items(
         session.add(ActionLog(seller_tg_id=tg, kind="items_check"))
         await session.commit()
 
-        items = await client.my_items(seller.playerok_id or "")
+        # Ошибки запроса лотов НЕ должны разлогинивать продавца: продажи и чаты
+        # работают отдельно, а поднятие/перевыставление — вторично.
+        try:
+            items = await client.my_items(seller.playerok_id or "")
+        except (AuthRequired, PlayerokError) as e:
+            log.warning("Лоты продавца %s недоступны: %s", tg, e)
+            return
         now = _now()
 
         if bump_on:
