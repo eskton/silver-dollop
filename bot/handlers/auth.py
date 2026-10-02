@@ -1,5 +1,6 @@
 """Вход в Playerok по почте: e-mail → код из письма → токен сессии в базе."""
 
+import asyncio
 import html
 import logging
 import re
@@ -14,6 +15,7 @@ from ..crypto import TokenCipher
 from ..db import SessionFactory
 from ..keyboards import is_cancel, BTN_LOGIN, cancel_kb, main_menu
 from ..playerok import PlayerokClient, PlayerokError
+from ..services.history import import_history_quietly
 from ..services.poller import sync_seller
 from ..services.sellers import get_or_create_seller
 
@@ -134,6 +136,8 @@ async def got_code(
 
     await message.answer(
         f"Готово! Вошёл как <b>{html.escape(viewer.username)}</b>.\n"
-        "Теперь буду присылать уведомления о заказах и сообщениях покупателей.",
+        "Теперь буду присылать уведомления о заказах и сообщениях покупателей.\n"
+        "Загружаю историю заказов для аналитики, это может занять минуту…",
         reply_markup=main_menu(True),
     )
+    asyncio.create_task(import_history_quietly(bot, sessions, cipher, seller))

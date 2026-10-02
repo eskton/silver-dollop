@@ -47,6 +47,10 @@ query viewer {
 DEALS = """
 query deals($pagination: Pagination, $filter: ItemDealFilter) {
   deals(pagination: $pagination, filter: $filter) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
     edges {
       node {
         id

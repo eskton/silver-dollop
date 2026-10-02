@@ -312,14 +312,44 @@ class PlayerokClient:
         self, user_id: str, statuses: tuple[str, ...] | None = None, limit: int = 30
     ) -> list[Deal]:
         """Продажи пользователя, свежие первыми. statuses=None — без фильтра по статусу."""
+        deals, _ = await self.sales_page(user_id, statuses=statuses, limit=limit)
+        return deals
+
+    async def sales_page(
+        self,
+        user_id: str,
+        *,
+        statuses: tuple[str, ...] | None = None,
+        limit: int = 30,
+        after: str | None = None,
+    ) -> tuple[list[Deal], str | None]:
+        """Одна страница продаж и курсор следующей (None — страниц больше нет)."""
         filt: dict[str, Any] = {"userId": user_id, "direction": "OUT"}
         if statuses:
             filt["status"] = list(statuses)
-        data = await self._gql(
-            "deals", q.DEALS, {"pagination": {"first": limit}, "filter": filt}
-        )
+        pagination: dict[str, Any] = {"first": limit}
+        if after:
+            pagination["after"] = after
+        data = await self._gql("deals", q.DEALS, {"pagination": pagination, "filter": filt})
         edges = _get(data, "deals", "edges", default=[]) or []
-        return [Deal.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+        deals = [Deal.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+        has_next = bool(_get(data, "deals", "pageInfo", "hasNextPage", default=False))
+        cursor = _get(data, "deals", "pageInfo", "endCursor")
+        return deals, (cursor if has_next and cursor and deals else None)
+
+    async def all_sales(self, user_id: str, max_pages: int = 100) -> list[Deal]:
+        """Вся история продаж: листает страницы, пока они есть."""
+        result: list[Deal] = []
+        seen: set[str] = set()
+        after: str | None = None
+        for _ in range(max_pages):
+            deals, after = await self.sales_page(user_id, limit=50, after=after)
+            fresh = [d for d in deals if d.id and d.id not in seen]
+            seen.update(d.id for d in fresh)
+            result.extend(fresh)
+            if not after or not fresh:
+                break
+        return result
 
     async def update_deal_status(self, deal_id: str, status: str) -> None:
         await self._gql("updateDeal", q.UPDATE_DEAL, {"input": {"id": deal_id, "status": status}})
