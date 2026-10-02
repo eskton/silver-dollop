@@ -197,7 +197,33 @@ class PlayerokClient:
             headers=HEADERS,
             cookies={"token": token} if token else None,
         )
-        return RawResponse(resp.status_code, resp.text, resp.cookies.get("token"))
+        return RawResponse(resp.status_code, resp.text, self._extract_token(resp, body))
+
+    def _extract_token(self, resp: Any, body: dict[str, Any]) -> str | None:
+        """Ищет cookie `token` везде, куда curl_cffi может его положить."""
+        found: str | None = None
+        names: set[str] = set()
+        for jar in (resp.cookies.jar, self._session.cookies.jar):
+            for c in jar:
+                names.add(c.name)
+                if c.name == "token" and c.value:
+                    found = c.value
+        set_cookies = resp.headers.get_list("set-cookie") or []
+        for raw in set_cookies:
+            name, _, rest = raw.partition("=")
+            names.add(name.strip())
+            if name.strip() == "token" and not found:
+                found = rest.split(";", 1)[0].strip() or None
+        if body.get("operationName") == "checkEmailAuthCode":
+            # Только имена, без значений: значения — это доступ к аккаунту.
+            log.info(
+                "checkEmailAuthCode: HTTP %s, cookies=%s, set-cookie=%d шт., токен %s",
+                resp.status_code,
+                sorted(names),
+                len(set_cookies),
+                "найден" if found else "НЕ найден",
+            )
+        return found
 
     @property
     def token(self) -> str | None:
