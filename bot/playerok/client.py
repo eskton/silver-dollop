@@ -358,6 +358,9 @@ class PlayerokClient:
         edges = _get(data, "chats", "edges", default=[]) or []
         return [ChatPreview.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
 
+    async def mark_chat_read(self, chat_id: str) -> None:
+        await self._gql("markChatAsRead", q.MARK_CHAT_AS_READ, {"input": {"chatId": chat_id}})
+
     async def send_message(self, chat_id: str, text: str) -> None:
         await self._gql(
             "createChatMessage",

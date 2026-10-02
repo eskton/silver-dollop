@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import ActionLog, DealState, DeliveryItem
+from .features import get_tz
 
 # Заказ считается продажей, если он оплачен и не возвращён.
 SALE_STATUSES = {"PAID", "SENT", "CONFIRMED", "COMPLETED"}
@@ -34,7 +35,7 @@ class Period:
         return self.revenue / self.orders if self.orders else 0.0
 
 
-def _money(value: float) -> str:
+def money(value: float) -> str:
     return f"{value:,.0f}".replace(",", " ") + " ₽"
 
 
@@ -44,6 +45,9 @@ def _is_problem(status: str) -> bool:
 
 async def build_report(session: AsyncSession, tg_id: int, now: datetime | None = None) -> str:
     now = now or datetime.utcnow()
+    tz = timedelta(hours=await get_tz(session, tg_id))
+    # «Сегодня» — с полуночи по часовому поясу продавца (даты в базе в UTC).
+    today_start = (now + tz).replace(hour=0, minute=0, second=0, microsecond=0) - tz
     deals = list(await session.scalars(select(DealState).where(DealState.seller_tg_id == tg_id)))
 
     periods = {
@@ -53,7 +57,7 @@ async def build_report(session: AsyncSession, tg_id: int, now: datetime | None =
         "all": Period("Всё время"),
     }
     bounds = {
-        "today": now.replace(hour=0, minute=0, second=0, microsecond=0),
+        "today": today_start,
         "week": now - timedelta(days=7),
         "month": now - timedelta(days=30),
         "all": datetime.min,
@@ -101,8 +105,8 @@ async def build_report(session: AsyncSession, tg_id: int, now: datetime | None =
     for p in periods.values():
         if p.orders:
             lines.append(
-                f"<b>{p.title}:</b> {p.orders} зак. · {_money(p.revenue)} · "
-                f"ср. чек {_money(p.avg)} · покупателей {len(p.buyers)}"
+                f"<b>{p.title}:</b> {p.orders} зак. · {money(p.revenue)} · "
+                f"ср. чек {money(p.avg)} · покупателей {len(p.buyers)}"
             )
         else:
             lines.append(f"<b>{p.title}:</b> продаж нет")
@@ -120,7 +124,7 @@ async def build_report(session: AsyncSession, tg_id: int, now: datetime | None =
         lines += ["", "🏆 <b>Топ лотов за 30 дней:</b>"]
         best = sorted(top.items(), key=lambda kv: (kv[1][1], kv[1][0]), reverse=True)[:5]
         for i, (name, (count, revenue)) in enumerate(best, 1):
-            lines.append(f"{i}. {html.escape(name[:40])} — {int(count)} шт. · {_money(revenue)}")
+            lines.append(f"{i}. {html.escape(name[:40])} — {int(count)} шт. · {money(revenue)}")
 
     if ratings:
         good = sum(1 for r in ratings if r >= 4)
@@ -151,7 +155,7 @@ async def build_report(session: AsyncSession, tg_id: int, now: datetime | None =
         "",
         "🤖 <b>Автоматизация за 30 дней:</b>",
         f"• выдано автовыдачей: {delivered}",
-        f"• поднятий лотов: {bumps} (потрачено {_money(float(bump_cost))})",
+        f"• поднятий лотов: {bumps} (потрачено {money(float(bump_cost))})",
         f"• перевыставлений: {relists or 0}",
     ]
 
@@ -168,5 +172,9 @@ async def build_report(session: AsyncSession, tg_id: int, now: datetime | None =
         lines += [f"• {html.escape(name[:40])} — осталось {n}" for name, n in low]
 
     if first_order:
-        lines += ["", f"<i>Данные с {first_order:%d.%m.%Y}, время UTC.</i>"]
+        hours = int(tz.total_seconds() // 3600)
+        lines += [
+            "",
+            f"<i>Данные с {first_order + tz:%d.%m.%Y}, часовой пояс UTC{hours:+d}.</i>",
+        ]
     return "\n".join(lines)

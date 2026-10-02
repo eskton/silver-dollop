@@ -298,6 +298,17 @@ async def get_param(session: AsyncSession, tg_id: int, key: str) -> int:
         return param.default
 
 
+DEFAULT_TZ = 3  # МСК
+
+
+async def get_tz(session: AsyncSession, tg_id: int) -> int:
+    """Смещение часового пояса продавца от UTC в часах."""
+    try:
+        return int(await get_setting(session, tg_id, "tz", str(DEFAULT_TZ)))
+    except ValueError:
+        return DEFAULT_TZ
+
+
 async def load_all_settings(session: AsyncSession, tg_id: int) -> dict[str, str]:
     rows = await session.scalars(select(SellerSetting).where(SellerSetting.seller_tg_id == tg_id))
     return {r.key: r.value for r in rows}

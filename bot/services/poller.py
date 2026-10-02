@@ -14,7 +14,7 @@ from ..db import SeenEvent, Seller, SessionFactory
 from ..keyboards import deal_kb, main_menu
 from ..playerok import AuthRequired, ChatPreview, Deal, PlayerokClient, PlayerokError
 from ..playerok.client import ACTIVE_SALE_STATUSES
-from . import automation
+from . import automation, notifications
 from .sellers import disconnect_seller
 
 log = logging.getLogger(__name__)
@@ -85,10 +85,12 @@ async def sync_seller(
             if not deal.id or deal.status not in ACTIVE_SALE_STATUSES:
                 continue
             is_new = await _mark_seen(sessions, seller.tg_id, "deal", deal.id)
-            if is_new and notify and seller.notify_deals:
-                await bot.send_message(
-                    seller.tg_id, _format_deal(deal), reply_markup=deal_kb(deal.chat_id)
-                )
+            if is_new and notify:
+                async with sessions() as session:
+                    await notifications.notify(
+                        bot, session, seller.tg_id, "deal", _format_deal(deal),
+                        reply_markup=deal_kb(deal.chat_id),
+                    )
         await automation.process_deals(bot, sessions, seller, client, deals, act=notify)
 
         chats = await client.chats(seller.playerok_id)
@@ -98,10 +100,12 @@ async def sync_seller(
             if chat.last_author_id == seller.playerok_id:
                 continue
             is_new = await _mark_seen(sessions, seller.tg_id, "message", chat.last_message_id)
-            if is_new and notify and seller.notify_messages:
-                await bot.send_message(
-                    seller.tg_id, _format_message(chat), reply_markup=deal_kb(chat.id)
-                )
+            if is_new and notify:
+                async with sessions() as session:
+                    await notifications.notify(
+                        bot, session, seller.tg_id, "message", _format_message(chat),
+                        reply_markup=deal_kb(chat.id),
+                    )
         await automation.process_chats(sessions, seller, client, chats, act=notify)
 
         if notify:

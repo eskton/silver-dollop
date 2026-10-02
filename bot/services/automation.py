@@ -26,11 +26,13 @@ from ..db import (
 )
 from ..playerok import ChatPreview, Deal, Item, PlayerokClient, PlayerokError
 from . import features as ft
+from .notifications import notify
 
 log = logging.getLogger(__name__)
 
 BUYER_CONFIRMED = ("CONFIRMED", "COMPLETED")
 PROBLEM_MARKERS = ("PROBLEM", "DISPUTE", "ROLLBACK", "REFUND")
+REFUND_MARKERS = ("ROLLBACK", "REFUND")
 RELIST_STATUSES = ("SOLD", "EXPIRED")
 ITEMS_CHECK_EVERY = timedelta(minutes=10)
 
@@ -41,6 +43,10 @@ def _now() -> datetime:
 
 def _is_problem(status: str) -> bool:
     return any(m in status.upper() for m in PROBLEM_MARKERS)
+
+
+def _is_refund(status: str) -> bool:
+    return any(m in status.upper() for m in REFUND_MARKERS)
 
 
 async def _say(client: PlayerokClient, chat_id: str | None, text: str) -> bool:
@@ -145,8 +151,9 @@ async def _process_deal(
             cur = "SENT"
             if await ft.get_flag(session, tg, "autoconfirm_msg_enabled", True):
                 await _say(client, deal.chat_id, await _tpl(session, seller, "autoconfirm_msg", deal))
-            await bot.send_message(
-                tg, f"🤝 Автоподтверждение: заказ «{html.escape(deal.item_name)}» отмечен выполненным."
+            await notify(
+                bot, session, tg, "system",
+                f"🤝 Автоподтверждение: заказ «{html.escape(deal.item_name)}» отмечен выполненным.",
             )
     # --- продавец подтвердил вручную ---
     elif cur == "SENT" and prev != "SENT":
@@ -159,17 +166,20 @@ async def _process_deal(
         state.confirmed_at = state.confirmed_at or now
         if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["after_buyer_confirm"]):
             await _say(client, deal.chat_id, await _tpl(session, seller, "after_buyer_confirm", deal))
-        await bot.send_message(
-            tg, f"✅ Покупатель подтвердил заказ «{html.escape(deal.item_name)}»."
+        await notify(
+            bot, session, tg, "confirmed",
+            f"✅ Покупатель подтвердил заказ «{html.escape(deal.item_name)}».",
         )
 
     # --- проблема / спор ---
     if _is_problem(cur) and not _is_problem(prev):
         if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["problem"]):
             await _say(client, deal.chat_id, await _tpl(session, seller, "problem", deal))
-        await bot.send_message(
-            tg,
-            f"⚠️ Проблема по заказу «{html.escape(deal.item_name)}» "
+        refund = _is_refund(cur)
+        title = "💸 Возврат средств" if refund else "⚠️ Проблема"
+        await notify(
+            bot, session, tg, "refund" if refund else "problem",
+            f"{title} по заказу «{html.escape(deal.item_name)}» "
             f"(покупатель {html.escape(deal.buyer_username)}), статус {html.escape(cur)}.\n{deal.deal_url}",
         )
 
@@ -182,8 +192,9 @@ async def _process_deal(
             await _say(client, deal.chat_id, await _tpl(session, seller, kind, deal))
         stars = "⭐" * max(1, min(5, deal.review_rating))
         body = f"\n{html.escape(deal.review_text)}" if deal.review_text else ""
-        await bot.send_message(
-            tg, f"{stars} Отзыв от {html.escape(deal.buyer_username)} за «{html.escape(deal.item_name)}»{body}"
+        await notify(
+            bot, session, tg, "review",
+            f"{stars} Отзыв от {html.escape(deal.buyer_username)} за «{html.escape(deal.item_name)}»{body}",
         )
 
     # --- напоминания ---
@@ -278,10 +289,17 @@ async def _deliver(
             DeliveryItem.item_key == deal.item_name.lower(),
         )
     )
-    msg = f"📦 Автовыдача: «{html.escape(deal.item_name)}» выдан {html.escape(deal.buyer_username)}. Осталось: {left}."
+    await notify(
+        bot, session, seller.tg_id, "system",
+        f"📦 Автовыдача: «{html.escape(deal.item_name)}» выдан "
+        f"{html.escape(deal.buyer_username)}. Осталось: {left}.",
+    )
     if not left:
-        msg += "\n⚠️ Запас закончился, пополни его в настройках автовыдачи."
-    await bot.send_message(seller.tg_id, msg)
+        await notify(
+            bot, session, seller.tg_id, "out_of_stock",
+            f"📭 Товар для «{html.escape(deal.item_name)}» закончился. "
+            "Пополни запас в настройках автовыдачи.",
+        )
 
 
 # ===================== чаты =====================
@@ -405,7 +423,7 @@ async def process_items(
                 spent += cost
                 session.add(ActionLog(seller_tg_id=tg, kind="bump", target=item.id, cost=cost))
                 await session.commit()
-                await bot.send_message(tg, f"🚀 Поднял лот «{html.escape(item.name)}».")
+                await notify(bot, session, tg, "system", f"🚀 Поднял лот «{html.escape(item.name)}».")
 
         if relist_on:
             interval = timedelta(hours=await ft.get_param(session, tg, "relist_interval_hours"))
@@ -421,7 +439,9 @@ async def process_items(
                     continue
                 session.add(ActionLog(seller_tg_id=tg, kind="relist", target=item.id))
                 await session.commit()
-                await bot.send_message(tg, f"🔁 Выставил заново лот «{html.escape(item.name)}».")
+                await notify(
+                    bot, session, tg, "relisted", f"🔁 Выставил заново лот «{html.escape(item.name)}»."
+                )
 
 
 async def relist_candidates(session: AsyncSession, tg: int, items: list[Item]) -> list[Item]:

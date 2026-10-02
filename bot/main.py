@@ -18,7 +18,7 @@ COMMANDS = [
     BotCommand(command="login", description="Войти в Playerok"),
     BotCommand(command="settings", description="Автоматизация"),
     BotCommand(command="stats", description="Аналитика продаж"),
-    BotCommand(command="account", description="Мой аккаунт"),
+    BotCommand(command="profile", description="Профиль: уведомления, заказы, клиенты"),
     BotCommand(command="notify", description="Настройки уведомлений"),
     BotCommand(command="help", description="Помощь"),
     BotCommand(command="cancel", description="Отменить действие"),

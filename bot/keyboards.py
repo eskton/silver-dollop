@@ -6,8 +6,6 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from .db import Seller
-
 BTN_ACCOUNT = "👤 Аккаунт"
 BTN_LOGIN = "🔑 Войти в Playerok"
 BTN_NOTIFY = "🔔 Уведомления"
@@ -15,6 +13,7 @@ BTN_HELP = "ℹ️ Помощь"
 BTN_CANCEL = "❌ Отмена"
 BTN_SETTINGS = "⚙️ Автоматизация"
 BTN_STATS = "📊 Аналитика"
+BTN_PROFILE = "👤 Профиль"
 
 
 def is_cancel(text: str | None) -> bool:
@@ -26,8 +25,7 @@ def main_menu(connected: bool) -> ReplyKeyboardMarkup:
     if connected:
         rows = [
             [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_STATS)],
-            [KeyboardButton(text=BTN_ACCOUNT), KeyboardButton(text=BTN_NOTIFY)],
-            [KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_HELP)],
         ]
     else:
         rows = [[KeyboardButton(text=BTN_LOGIN)], [KeyboardButton(text=BTN_HELP)]]
@@ -40,37 +38,6 @@ def cancel_kb() -> ReplyKeyboardMarkup:
 
 def remove_kb() -> ReplyKeyboardRemove:
     return ReplyKeyboardRemove()
-
-
-def account_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Проверить сессию", callback_data="account:check")],
-            [InlineKeyboardButton(text="🚪 Выйти из Playerok", callback_data="account:logout")],
-        ]
-    )
-
-
-def notify_kb(seller: Seller) -> InlineKeyboardMarkup:
-    def mark(flag: bool) -> str:
-        return "✅" if flag else "☑️"
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"{mark(seller.notify_deals)} Новые заказы",
-                    callback_data="notify:deals",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"{mark(seller.notify_messages)} Сообщения покупателей",
-                    callback_data="notify:messages",
-                )
-            ],
-        ]
-    )
 
 
 def deal_kb(chat_id: str | None) -> InlineKeyboardMarkup | None:

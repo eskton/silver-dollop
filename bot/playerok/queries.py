@@ -166,3 +166,12 @@ mutation createChatMessage($input: CreateChatMessageInput!) {
   }
 }
 """
+
+MARK_CHAT_AS_READ = """
+mutation markChatAsRead($input: MarkChatAsReadInput!) {
+  markChatAsRead(input: $input) {
+    id
+    unreadMessagesCounter
+  }
+}
+"""
