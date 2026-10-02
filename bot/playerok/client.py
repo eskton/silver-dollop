@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -186,7 +187,10 @@ class PlayerokClient:
         from curl_cffi.requests import AsyncSession
 
         if self._session is None:
-            self._session = AsyncSession(impersonate="chrome", timeout=self._timeout)
+            # PLAYEROK_PROXY — прокси для запросов к Playerok (например, если сайт
+            # не пускает IP хостинга): http://user:pass@host:port или socks5://...
+            proxy = os.getenv("PLAYEROK_PROXY", "").strip() or None
+            self._session = AsyncSession(impersonate="chrome", timeout=self._timeout, proxy=proxy)
         resp = await self._session.post(
             BASE_URL + "/graphql",
             json=body,
