@@ -479,15 +479,31 @@ async def stock_items(message: Message, state: FSMContext, sessions: SessionFact
     if not units:
         await message.answer("Пусто. Пришли хотя бы одну строку.")
         return
+    key = lot.lower()
     async with sessions() as session:
-        session.add_all(
-            DeliveryItem(
-                seller_tg_id=message.from_user.id, item_name=lot, item_key=lot.lower(), content=u
+        # Защита от дублей: не добавляем товар, который для этого лота уже есть
+        # (хоть свободный, хоть уже выданный) — чтобы выданные коды не вернулись.
+        existing = set(
+            await session.scalars(
+                select(DeliveryItem.content).where(
+                    DeliveryItem.seller_tg_id == message.from_user.id,
+                    DeliveryItem.item_key == key,
+                )
             )
-            for u in units
         )
+        fresh, dupes, seen = [], 0, set()
+        for u in units:
+            if u in existing or u in seen:
+                dupes += 1
+                continue
+            seen.add(u)
+            fresh.append(DeliveryItem(seller_tg_id=message.from_user.id, item_name=lot, item_key=key, content=u))
+        session.add_all(fresh)
         await session.commit()
-    await _finish(message, state, sessions, f"✅ Добавлено {len(units)} шт. для «{html.escape(lot)}».")
+    note = f"✅ Добавлено {len(fresh)} шт. для «{html.escape(lot)}»."
+    if dupes:
+        note += f"\nПропущено дублей (уже были в этом лоте): {dupes}."
+    await _finish(message, state, sessions, note)
 
 
 @router.callback_query(F.data.startswith("ad:clear:"))

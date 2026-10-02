@@ -34,8 +34,10 @@ Telegram-бот в духе FunPay Cardinal, но для [playerok.com](https://
 ### Docker / хостинг (Railway, Fly.io, любой VPS)
 
 В репозитории есть `Dockerfile`. Задай переменные окружения `BOT_TOKEN` и `SECRET_KEY`
-в настройках сервиса и подключи volume к `/app/data`, иначе база SQLite пропадёт при
-перезапуске. Для Railway: New Project → Deploy from GitHub → выбрать репозиторий →
+в настройках сервиса и подключи volume к `/app/data` (ровно этот путь), иначе база SQLite
+пропадёт при перезапуске и выданные коды автовыдачи вернутся. При старте бот пишет в лог
+путь к базе и число записей — по ним видно, сохранилась ли база. Путь можно сменить
+переменной `DATA_DIR` (по умолчанию `/app/data`). Для Railway: New Project → Deploy from GitHub → выбрать репозиторий →
 Variables → добавить переменные → в Settings добавить Volume с mount path `/app/data`.
 
 ## Структура

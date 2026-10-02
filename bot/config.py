@@ -28,10 +28,14 @@ def load_settings() -> Settings:
     admin_ids = frozenset(
         int(x) for x in os.getenv("ADMIN_IDS", "").replace(",", " ").split() if x.strip()
     )
+    # База по умолчанию — абсолютный путь в DATA_DIR (на Railway это volume).
+    # Абсолютный путь, чтобы файл не зависел от рабочей директории процесса.
+    data_dir = os.getenv("DATA_DIR", "/app/data")
+    default_db = f"sqlite+aiosqlite:///{os.path.join(data_dir, 'bot.db')}"
     return Settings(
         bot_token=bot_token,
         secret_key=secret_key,
-        db_url=os.getenv("DB_URL", "sqlite+aiosqlite:///./data/bot.db"),
+        db_url=os.getenv("DB_URL", default_db),
         poll_interval=int(os.getenv("POLL_INTERVAL", "30")),
         admin_ids=admin_ids,
     )

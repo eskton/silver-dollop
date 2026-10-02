@@ -31,8 +31,26 @@ async def main() -> None:
     )
     settings = load_settings()
     cipher = TokenCipher(settings.secret_key)
-    Path("data").mkdir(exist_ok=True)
+    # Логируем, где реально лежит база и сохранилась ли она — так по логам после
+    # перезапуска видно, работает ли том (volume) и не обнулилась ли база.
+    db_path = settings.db_url.split("///", 1)[-1] if settings.db_url.startswith("sqlite") else ""
+    if db_path:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        existed = Path(db_path).exists()
+        logging.info("База: %s (файл %s)", db_path, "уже был" if existed else "создаётся заново")
     sessions = await init_db(settings.db_url)
+    if db_path:
+        from sqlalchemy import func, select
+
+        from .db import DeliveryItem, Seller
+
+        async with sessions() as s:
+            sellers = await s.scalar(select(func.count(Seller.tg_id)))
+            items = await s.scalar(select(func.count(DeliveryItem.id)))
+            used = await s.scalar(
+                select(func.count(DeliveryItem.id)).where(DeliveryItem.used_deal_id.is_not(None))
+            )
+        logging.info("В базе: продавцов %s, товаров автовыдачи %s (выдано %s)", sellers, items, used)
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
