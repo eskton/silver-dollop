@@ -17,6 +17,8 @@ from ..db import AutoReply, DeliveryItem, RelistRule, Seller, SessionFactory, Te
 from ..crypto import TokenCipher
 from ..keyboards import is_cancel, BTN_SETTINGS, cancel_kb, main_menu
 from ..playerok import AuthRequired, PlayerokClient, PlayerokError
+from ..plugins import PAID_PLUGINS
+from ..plugins.access import has_access
 from ..services import features as ft
 from ..services.automation import relist_candidates
 from ..services.sellers import get_or_create_seller
@@ -65,8 +67,14 @@ def _h(name: str) -> str:
 # ===================== главное меню настроек =====================
 
 
-def settings_menu_kb() -> InlineKeyboardMarkup:
-    rows = [[_btn(f.title, f"f:{f.key}")] for f in ft.FEATURES]
+async def settings_menu_kb(sessions: SessionFactory, tg_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    async with sessions() as session:
+        for f in ft.FEATURES:
+            title = f.title
+            if f.key in PAID_PLUGINS and not await has_access(session, tg_id, f.key):
+                title += " 🔒"
+            rows.append([_btn(title, f"f:{f.key}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -81,12 +89,17 @@ async def settings_menu(message: Message, sessions: SessionFactory) -> None:
             reply_markup=main_menu(False),
         )
         return
-    await message.answer("⚙️ <b>Автоматизация</b>\nВыбери функцию:", reply_markup=settings_menu_kb())
+    await message.answer(
+        "⚙️ <b>Автоматизация</b>\nВыбери функцию:",
+        reply_markup=await settings_menu_kb(sessions, message.from_user.id),
+    )
 
 
 @router.callback_query(F.data == "st")
-async def settings_menu_cb(cb: CallbackQuery) -> None:
-    await _show(cb, "⚙️ <b>Автоматизация</b>\nВыбери функцию:", settings_menu_kb())
+async def settings_menu_cb(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    await _show(
+        cb, "⚙️ <b>Автоматизация</b>\nВыбери функцию:", await settings_menu_kb(sessions, cb.from_user.id)
+    )
 
 
 async def _show(cb: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
@@ -110,7 +123,7 @@ async def render_feature(
     if feature.special == "relist":
         return await render_relist(sessions, seller, feature)
     if feature.special == "stars":
-        from .stars import render_stars
+        from ..plugins.stars.handlers import render_stars
 
         return await render_stars(sessions, seller, feature)
 
@@ -174,6 +187,11 @@ async def feature_cb(cb: CallbackQuery, state: FSMContext, sessions: SessionFact
     tg = cb.from_user.id
     action = parts[2] if len(parts) > 2 else ""
     arg = parts[3] if len(parts) > 3 else ""
+    if feature.key in PAID_PLUGINS and action:
+        async with sessions() as session:
+            if not await has_access(session, tg, feature.key):
+                await cb.answer("Платный плагин: доступ выдаёт владелец бота", show_alert=True)
+                return
 
     if action == "t":
         async with sessions() as session:

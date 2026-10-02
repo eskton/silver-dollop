@@ -54,10 +54,21 @@ bot/
     automation.py   движок: реакции на сделки, чаты, лоты
     features.py     реестр функций, шаблоны и настройки по продавцу
     sellers.py      работа с продавцами в базе
+  plugins/
+    access.py       доступ к платным плагинам
+    stars/          плагин «Звёзды через Fragment» (fragment.py, ton.py, service.py, handlers.py)
   playerok/
     client.py       HTTP-клиент
     queries.py      GraphQL-запросы к сайту — единственное место, где они описаны
 ```
+
+## Плагины и доступ
+
+Плагины лежат в `bot/plugins/<имя>/`. Платные перечислены в `bot/plugins/__init__.py`
+(`PAID_PLUGINS`): без доступа раздел виден с замком и не работает. Доступ выдают админы
+(`ADMIN_IDS` в переменных окружения) командами в боте:
+`/grant <id или @username> stars [дней]`, `/revoke ...`, `/access`, `/sellers`, `/admin`.
+Контакт для пользователей — `OWNER_CONTACT`.
 
 ## Звёзды через Fragment
 

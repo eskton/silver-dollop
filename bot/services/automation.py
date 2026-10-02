@@ -27,7 +27,7 @@ from ..db import (
 from ..playerok import ChatPreview, Deal, Item, PlayerokClient, PlayerokError
 from ..crypto import TokenCipher
 from . import features as ft
-from . import stars as stars_svc
+from ..plugins.stars import service as stars_svc
 from .notifications import notify
 
 log = logging.getLogger(__name__)

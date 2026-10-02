@@ -195,6 +195,20 @@ class StarsOrder(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class PluginAccess(Base):
+    """Кому выдан платный плагин и до какого срока (NULL — бессрочно)."""
+
+    __tablename__ = "plugin_access"
+    __table_args__ = (UniqueConstraint("seller_tg_id", "plugin"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    plugin: Mapped[str] = mapped_column(String(32))
+    granted_by: Mapped[int] = mapped_column(BigInteger)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class ActionLog(Base):
     """Счётчики действий за сутки (лимит автоподнятия и т.п.)."""
 

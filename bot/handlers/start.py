@@ -5,6 +5,7 @@ from aiogram.types import Message
 
 from ..db import SessionFactory
 from ..keyboards import BTN_HELP, main_menu
+from ..plugins.access import is_admin
 from ..services.sellers import get_or_create_seller
 
 router = Router(name="start")
@@ -23,6 +24,7 @@ HELP_TEXT = (
     "/notify — какие уведомления присылать и со звуком ли\n"
     "/cancel — отменить текущее действие"
 )
+ADMIN_HINT = "\n\nТы админ: /admin — выдача доступа к платным плагинам."
 
 
 @router.message(CommandStart())
@@ -42,4 +44,5 @@ async def cmd_start(message: Message, state: FSMContext, sessions: SessionFactor
 async def cmd_help(message: Message, sessions: SessionFactory) -> None:
     async with sessions() as session:
         seller = await get_or_create_seller(session, message.from_user)
-    await message.answer(HELP_TEXT, reply_markup=main_menu(seller.is_connected))
+    extra = ADMIN_HINT if is_admin(message.from_user.id) else ""
+    await message.answer(HELP_TEXT + extra, reply_markup=main_menu(seller.is_connected))

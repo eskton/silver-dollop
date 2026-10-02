@@ -13,18 +13,27 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, func, select
 
-from ..crypto import TokenCipher
-from ..db import Seller, SessionFactory, StarsOrder, StarsRule
-from ..fragment import FragmentClient, FragmentError, parse_cookies
-from ..keyboards import cancel_kb, is_cancel, main_menu
-from ..playerok import PlayerokClient
-from ..services import features as ft
-from ..services import stars as st
-from ..services.sellers import get_or_create_seller
-from ..ton import TonWallet, TonWalletError
+from ...crypto import TokenCipher
+from ...db import Seller, SessionFactory, StarsOrder, StarsRule
+from ...keyboards import cancel_kb, is_cancel, main_menu
+from ...playerok import PlayerokClient
+from ...services import features as ft
+from ...services.sellers import get_or_create_seller
+from ..access import has_access, locked_screen
+from . import service as st
+from .fragment import FragmentClient, FragmentError, parse_cookies
+from .ton import TonWallet, TonWalletError
 
 router = Router(name="stars")
 log = logging.getLogger(__name__)
+
+
+async def _allowed(cb: CallbackQuery, sessions: SessionFactory) -> bool:
+    async with sessions() as session:
+        ok = await has_access(session, cb.from_user.id, st.PLUGIN_KEY)
+    if not ok:
+        await cb.answer("Платный плагин: доступ выдаёт владелец бота", show_alert=True)
+    return ok
 
 FEATURE = ft.FEATURE_BY_KEY["stars"]
 STATUS_RU = {
@@ -67,6 +76,8 @@ async def render_stars(
 ) -> tuple[str, InlineKeyboardMarkup]:
     tg = seller.tg_id
     async with sessions() as session:
+        if not await has_access(session, tg, st.PLUGIN_KEY):
+            return await locked_screen(session, feature)
         enabled = await ft.is_enabled(session, tg, feature)
         has_cookies = bool(await ft.get_setting(session, tg, "stars_cookies_enc", ""))
         has_seed = bool(await ft.get_setting(session, tg, "stars_seed_enc", ""))
@@ -156,7 +167,9 @@ async def _show_screen(target: Message | CallbackQuery, sessions: SessionFactory
 
 
 @router.callback_query(F.data == "sr:cookies")
-async def ask_cookies(cb: CallbackQuery, state: FSMContext) -> None:
+async def ask_cookies(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    if not await _allowed(cb, sessions):
+        return
     await state.set_state(SetCookies.text)
     await cb.answer()
     await cb.message.answer(
@@ -198,7 +211,9 @@ async def save_cookies(
 
 
 @router.callback_query(F.data == "sr:seed")
-async def ask_seed(cb: CallbackQuery, state: FSMContext) -> None:
+async def ask_seed(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    if not await _allowed(cb, sessions):
+        return
     await state.set_state(SetSeed.text)
     await cb.answer()
     await cb.message.answer(
@@ -246,6 +261,8 @@ async def save_seed(
 
 @router.callback_query(F.data == "sr:ver")
 async def toggle_version(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    if not await _allowed(cb, sessions):
+        return
     tg = cb.from_user.id
     async with sessions() as session:
         cur = await ft.get_setting(session, tg, "stars_wallet_version", "v5r1")
@@ -267,6 +284,8 @@ async def toggle_version(cb: CallbackQuery, sessions: SessionFactory, cipher: To
 
 @router.callback_query(F.data == "sr:check")
 async def check_all(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    if not await _allowed(cb, sessions):
+        return
     await cb.answer("Проверяю…")
     async with sessions() as session:
         seller = await get_or_create_seller(session, cb.from_user)
@@ -302,7 +321,9 @@ async def check_all(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCi
 
 
 @router.callback_query(F.data == "sr:rule")
-async def rule_add(cb: CallbackQuery, state: FSMContext) -> None:
+async def rule_add(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    if not await _allowed(cb, sessions):
+        return
     await state.set_state(AddStarsRule.pattern)
     await cb.answer()
     await cb.message.answer(
@@ -340,6 +361,8 @@ async def rule_stars(message: Message, state: FSMContext, sessions: SessionFacto
 
 @router.callback_query(F.data.startswith("sr:rdel:"))
 async def rule_del(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    if not await _allowed(cb, sessions):
+        return
     rule_id = int(cb.data.split(":")[2])
     async with sessions() as session:
         await session.execute(
@@ -354,6 +377,8 @@ async def rule_del(cb: CallbackQuery, sessions: SessionFactory) -> None:
 
 @router.callback_query(F.data == "sr:orders")
 async def orders(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    if not await _allowed(cb, sessions):
+        return
     async with sessions() as session:
         rows = list(
             await session.scalars(
@@ -384,6 +409,8 @@ async def orders(cb: CallbackQuery, sessions: SessionFactory) -> None:
 
 @router.callback_query(F.data.startswith("sr:retry:"))
 async def retry_order(cb: CallbackQuery, bot: Bot, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    if not await _allowed(cb, sessions):
+        return
     order_id = int(cb.data.split(":")[2])
     async with sessions() as session:
         seller = await get_or_create_seller(session, cb.from_user)

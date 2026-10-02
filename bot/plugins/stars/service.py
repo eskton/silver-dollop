@@ -16,15 +16,18 @@ from aiogram import Bot
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..crypto import TokenCipher
-from ..db import Seller, StarsOrder, StarsRule
-from ..fragment import FragmentAuthError, FragmentClient, FragmentError, RecipientNotFound, parse_cookies
-from ..playerok import Deal, PlayerokClient, PlayerokError
-from ..ton import TonWallet, TonWalletError
-from . import features as ft
-from .notifications import notify
+from ...crypto import TokenCipher
+from ...db import Seller, StarsOrder, StarsRule
+from ...playerok import Deal, PlayerokClient, PlayerokError
+from ...services import features as ft
+from ...services.notifications import notify
+from ..access import has_access
+from .fragment import FragmentAuthError, FragmentClient, FragmentError, RecipientNotFound, parse_cookies
+from .ton import TonWallet, TonWalletError
 
 log = logging.getLogger(__name__)
+
+PLUGIN_KEY = "stars"
 
 USERNAME_RE = re.compile(r"@?([A-Za-z][A-Za-z0-9_]{3,31})")
 STARS_IN_NAME_RE = re.compile(r"(\d[\d\s]{0,6}\d|\d)\s*(?:⭐|★|звезд|звёзд|stars?)", re.I)
@@ -88,6 +91,8 @@ async def on_paid(
     """Новый оплаченный заказ. True — это заказ звёзд, бот взял его в работу."""
     tg = seller.tg_id
     if not await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["stars"]):
+        return False
+    if not await has_access(session, tg, PLUGIN_KEY):
         return False
     qty = await stars_for_lot(session, tg, deal.item_name)
     if qty is None:
