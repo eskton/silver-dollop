@@ -139,6 +139,7 @@ class DealState(Base):
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
     autoconfirm_failed: Mapped[bool | None] = mapped_column(Boolean, default=False)
     stock_alerted: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    relisted: Mapped[bool | None] = mapped_column(Boolean, default=False)
     confirm_reminded_at: Mapped[datetime | None] = mapped_column(DateTime)
     confirm_reminders: Mapped[int] = mapped_column(Integer, default=0)
     review_reminded: Mapped[bool] = mapped_column(Boolean, default=False)

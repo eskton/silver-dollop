@@ -40,11 +40,10 @@ def remove_kb() -> ReplyKeyboardRemove:
     return ReplyKeyboardRemove()
 
 
-def deal_kb(chat_id: str | None) -> InlineKeyboardMarkup | None:
-    if not chat_id:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Ответить покупателю", callback_data=f"reply:{chat_id}")]
-        ]
-    )
+def deal_kb(chat_id: str | None, item_id: str | None = None) -> InlineKeyboardMarkup | None:
+    rows = []
+    if chat_id:
+        rows.append([InlineKeyboardButton(text="💬 Ответить покупателю", callback_data=f"reply:{chat_id}")])
+    if item_id and len(f"rl:pub:{item_id}".encode()) <= 64:
+        rows.append([InlineKeyboardButton(text="🔄 Выставить заново", callback_data=f"rl:pub:{item_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None

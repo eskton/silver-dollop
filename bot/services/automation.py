@@ -38,6 +38,7 @@ BUYER_CONFIRMED = ("CONFIRMED", "COMPLETED")
 PROBLEM_MARKERS = ("PROBLEM", "DISPUTE", "ROLLBACK", "REFUND")
 REFUND_MARKERS = ("ROLLBACK", "REFUND")
 RELIST_STATUSES = ("SOLD", "EXPIRED")
+SOLD_DEAL_STATUSES = ("PAID", "SENT", "CONFIRMED", "COMPLETED")
 ITEMS_CHECK_EVERY = timedelta(minutes=10)
 
 
@@ -120,6 +121,7 @@ async def _process_deal(
             item_name=deal.item_name,
             status=deal.status,
             first_seen_at=_now(),
+            relisted=False,  # NULL у старых записей = «не трогать», см. перевыставление
         )
         session.add(state)
     if state.chat_id is None and deal.chat_id:
@@ -137,6 +139,7 @@ async def _process_deal(
         if deal.review_rating is not None:
             state.review_thanked = True
             state.review_reminded = True
+        state.relisted = True  # старые продажи не выставляем заново
         return
 
     now = _now()
@@ -194,6 +197,17 @@ async def _process_deal(
         state.sent_at = state.sent_at or now
         if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["after_seller_confirm"]):
             await _say(client, deal.chat_id, await _tpl(session, seller, "after_seller_confirm", deal))
+
+    # --- лот продан → выставить заново (по сделке, без списка лотов) ---
+    if (
+        cur in SOLD_DEAL_STATUSES
+        and state.relisted is False  # только сделки, появившиеся после этой версии
+        and deal.item_id
+        and now - (state.created_at or state.first_seen_at or now) <= timedelta(hours=48)
+        and await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["relist"])
+        and await relist_allowed(session, tg, deal.item_name, deal.item_url)
+    ):
+        await relist_after_sale(bot, session, seller, client, deal, state)
 
     # --- покупатель подтвердил ---
     if cur in BUYER_CONFIRMED and prev not in BUYER_CONFIRMED:
@@ -568,6 +582,41 @@ async def process_items(
                 await notify(
                     bot, session, tg, "relisted", f"🔁 Выставил заново лот «{html.escape(item.name)}»."
                 )
+
+
+async def relist_allowed(session: AsyncSession, tg: int, name: str, url: str) -> bool:
+    """Подходит ли лот под режим «все лоты» или под правила отбора."""
+    if await ft.get_flag(session, tg, "relist_all", True):
+        return True
+    hay = f"{name} {url}".lower()
+    patterns = await session.scalars(select(RelistRule.pattern).where(RelistRule.seller_tg_id == tg))
+    return any(p.lower() in hay for p in patterns)
+
+
+async def relist_after_sale(
+    bot: Bot, session: AsyncSession, seller: Seller, client: PlayerokClient, deal: Deal, state: DealState
+) -> None:
+    """Выставляет проданный лот заново прямо по сделке — без запроса списка лотов,
+    который Playerok может не отдавать. Один раз на сделку."""
+    tg = seller.tg_id
+    state.relisted = True
+    try:
+        await client.publish_item(deal.item_id)
+    except PlayerokError as e:
+        log.warning("Перевыставление %s (сделка %s): %s", deal.item_id, deal.id, e)
+        await notify(
+            bot, session, tg, "problem",
+            f"⚠️ Не смог выставить заново «{html.escape(deal.item_name)}»: "
+            f"<code>{html.escape(str(e))[:300]}</code>\n"
+            f"Выставь вручную: {_link(deal.item_url, 'Открыть лот')}\n"
+            "Пришли этот текст разработчику — поправлю запрос.",
+        )
+        return
+    session.add(ActionLog(seller_tg_id=tg, kind="relist", target=deal.item_id))
+    await notify(
+        bot, session, tg, "relisted",
+        f"🔁 Выставил заново «{html.escape(deal.item_name)}» — {_link(deal.item_url, 'Открыть лот')}",
+    )
 
 
 async def relist_candidates(session: AsyncSession, tg: int, items: list[Item]) -> list[Item]:

@@ -94,7 +94,7 @@ async def sync_seller(
                     await notifications.notify(
                         bot, session, seller.tg_id, "deal",
                         _format_deal(deal, account, number),
-                        reply_markup=deal_kb(deal.chat_id),
+                        reply_markup=deal_kb(deal.chat_id, deal.item_id),
                     )
         await automation.process_deals(bot, sessions, seller, client, deals, act=notify)
 

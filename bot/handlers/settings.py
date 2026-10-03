@@ -762,3 +762,18 @@ async def relist_all(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenC
         for item in candidates[:30]:
             results.append(await _restore(client, sessions, seller.tg_id, item.id, item.name))
     await cb.message.answer("\n".join(results))
+
+
+@router.callback_query(F.data.startswith("rl:pub:"))
+async def relist_publish_now(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    """Кнопка «🔄 Выставить заново» под уведомлением о заказе: публикует лот по ID,
+    без запроса списка лотов."""
+    item_id = cb.data.split(":", 2)[2]
+    seller = await _seller(sessions, cb)
+    if not seller.is_connected:
+        await cb.answer("Аккаунт не подключён", show_alert=True)
+        return
+    await cb.answer("Выставляю…")
+    async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+        result = await _restore(client, sessions, seller.tg_id, item_id, "Лот")
+    await cb.message.answer(result.replace("Лот", "Лот выставлен заново", 1) if result.startswith("✅") else result)
