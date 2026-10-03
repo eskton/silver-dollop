@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -26,8 +27,11 @@ COMMANDS = [
 
 
 async def main() -> None:
+    # В stdout: Railway помечает всё из stderr как Error, даже обычные INFO.
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
     )
     settings = load_settings()
     cipher = TokenCipher(settings.secret_key)
