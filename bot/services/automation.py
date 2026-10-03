@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import html
+import re
+import unicodedata
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -147,8 +149,17 @@ async def _process_deal(
             state.delivered = False  # выдача звёзд идёт своим путём, автоподтверждение не трогаем
             state.status = cur
             return
-        if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["autodelivery"]):
-            await _deliver(bot, session, seller, client, deal, state)
+
+    # --- автовыдача: пробуем, пока заказ оплачен и товар не выдан (например,
+    # запас добавили позже или отправка в чат не прошла с первого раза) ---
+    if (
+        cur == "PAID"
+        and not state.delivered
+        # не трогаем старые заказы: их продавец мог уже закрыть вручную
+        and now - (state.created_at or state.first_seen_at or now) <= timedelta(hours=24)
+        and await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["autodelivery"])
+    ):
+        await _deliver(bot, session, seller, client, deal, state)
 
     # --- автоподтверждение (сразу или с задержкой) ---
     if cur == "PAID" and await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["autoconfirm"]):
@@ -290,6 +301,41 @@ def _update_analytics(state: DealState, deal: Deal) -> None:
         state.item_name = deal.item_name
 
 
+def norm_lot(name: str | None) -> str:
+    """Название лота без эмодзи, знаков, регистра и лишних пробелов —
+    чтобы «💰 50 РОБУКСОВ | ПРОМОКОД 💎» совпало с «50 робуксов промокод»."""
+    s = unicodedata.normalize("NFKC", name or "").lower().replace("ё", "е")
+    s = re.sub(r"[^\w]+", " ", s)
+    return " ".join(s.split())
+
+
+async def match_stock_key(
+    session: AsyncSession, tg: int, item_name: str, *, only_free: bool
+) -> str | None:
+    """item_key запаса, который относится к лоту сделки. Сначала точное совпадение
+    нормализованных названий, затем вхождение одного в другое (самое длинное)."""
+    q = select(DeliveryItem.item_key, DeliveryItem.item_name).where(DeliveryItem.seller_tg_id == tg)
+    if only_free:
+        q = q.where(DeliveryItem.used_deal_id.is_(None))
+    rows = (await session.execute(q.distinct())).all()
+    target = norm_lot(item_name)
+    if not target:
+        return None
+    best: tuple[int, str] | None = None
+    for key, name in rows:
+        n = norm_lot(name)
+        if not n:
+            continue
+        if n == target:
+            return key
+        short = min(len(n), len(target))
+        # по целым словам: «50 робуксов» не должно совпасть с «150 робуксов»
+        if short >= 6 and (f" {n} " in f" {target} " or f" {target} " in f" {n} "):
+            if best is None or len(n) > best[0]:
+                best = (len(n), key)
+    return best[1] if best else None
+
+
 async def _deliver(
     bot: Bot,
     session: AsyncSession,
@@ -298,33 +344,40 @@ async def _deliver(
     deal: Deal,
     state: DealState,
 ) -> None:
-    if state.delivered or not deal.chat_id:
+    if state.delivered:
         return
-    item = await session.scalar(
-        select(DeliveryItem)
-        .where(
-            DeliveryItem.seller_tg_id == seller.tg_id,
-            DeliveryItem.used_deal_id.is_(None),
-            DeliveryItem.item_key == deal.item_name.lower(),
-        )
-        .order_by(DeliveryItem.id)
-        .limit(1)
-    )
-    if item is None:
-        # Если для лота запас когда-то был — значит он кончился: покупатель ждёт,
-        # продавцу нужно выдать вручную. Если запаса не было — лот без автовыдачи.
-        had_stock = await session.scalar(
-            select(func.count(DeliveryItem.id)).where(
+    key = await match_stock_key(session, seller.tg_id, deal.item_name, only_free=True)
+    item = None
+    if key is not None:
+        item = await session.scalar(
+            select(DeliveryItem)
+            .where(
                 DeliveryItem.seller_tg_id == seller.tg_id,
-                DeliveryItem.item_key == deal.item_name.lower(),
+                DeliveryItem.used_deal_id.is_(None),
+                DeliveryItem.item_key == key,
             )
+            .order_by(DeliveryItem.id)
+            .limit(1)
         )
-        if had_stock:
+    if item is None:
+        # Запас для лота когда-то был — значит кончился: покупатель ждёт.
+        # Запаса не было вовсе — лот без автовыдачи, молчим.
+        if await match_stock_key(session, seller.tg_id, deal.item_name, only_free=False) and not state.stock_alerted:
+            state.stock_alerted = True
             await notify(
                 bot, session, seller.tg_id, "out_of_stock",
                 f"📭 <b>Заказ без товара!</b> Запас «{html.escape(deal.item_name)}» пуст, "
                 f"покупатель {html.escape(deal.buyer_username)} ждёт.\n"
                 f"Выдай вручную или пополни запас: {_link(deal.deal_url, 'Открыть заказ')}",
+            )
+        return
+    if not deal.chat_id:
+        if not state.stock_alerted:
+            state.stock_alerted = True
+            await notify(
+                bot, session, seller.tg_id, "problem",
+                f"⚠️ Не нашёл чат заказа «{html.escape(deal.item_name)}», товар не выдан. "
+                f"Выдай вручную: {_link(deal.deal_url, 'Открыть заказ')}",
             )
         return
     intro = await _tpl(session, seller, "delivery_msg", deal)
@@ -338,7 +391,7 @@ async def _deliver(
         select(func.count(DeliveryItem.id)).where(
             DeliveryItem.seller_tg_id == seller.tg_id,
             DeliveryItem.used_deal_id.is_(None),
-            DeliveryItem.item_key == deal.item_name.lower(),
+            DeliveryItem.item_key == item.item_key,
         )
     )
     await notify(
