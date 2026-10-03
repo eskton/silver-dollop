@@ -298,7 +298,22 @@ async def _deliver(
         .limit(1)
     )
     if item is None:
-        return  # для этого лота автовыдача не настроена или запас кончился
+        # Если для лота запас когда-то был — значит он кончился: покупатель ждёт,
+        # продавцу нужно выдать вручную. Если запаса не было — лот без автовыдачи.
+        had_stock = await session.scalar(
+            select(func.count(DeliveryItem.id)).where(
+                DeliveryItem.seller_tg_id == seller.tg_id,
+                DeliveryItem.item_key == deal.item_name.lower(),
+            )
+        )
+        if had_stock:
+            await notify(
+                bot, session, seller.tg_id, "out_of_stock",
+                f"📭 <b>Заказ без товара!</b> Запас «{html.escape(deal.item_name)}» пуст, "
+                f"покупатель {html.escape(deal.buyer_username)} ждёт.\n"
+                f"Выдай вручную или пополни запас: {_link(deal.deal_url, 'Открыть заказ')}",
+            )
+        return
     intro = await _tpl(session, seller, "delivery_msg", deal)
     text = f"{intro}\n{item.content}" if intro.strip() else item.content
     if not await _say(client, deal.chat_id, text):
