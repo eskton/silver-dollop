@@ -137,6 +137,7 @@ class DealState(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
+    autoconfirm_failed: Mapped[bool | None] = mapped_column(Boolean, default=False)
     confirm_reminded_at: Mapped[datetime | None] = mapped_column(DateTime)
     confirm_reminders: Mapped[int] = mapped_column(Integer, default=0)
     review_reminded: Mapped[bool] = mapped_column(Boolean, default=False)

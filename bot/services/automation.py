@@ -155,16 +155,29 @@ async def _process_deal(
         only_delivered = await ft.get_flag(session, tg, "autoconfirm_only_delivered", True)
         delay = await ft.get_param(session, tg, "autoconfirm_delay")
         ready = now - state.first_seen_at >= timedelta(minutes=delay)
-        if ready and (state.delivered or not only_delivered):
-            await client.confirm_deal(deal.id)
-            state.sent_at = now
-            cur = "SENT"
-            if await ft.get_flag(session, tg, "autoconfirm_msg_enabled", True):
-                await _say(client, deal.chat_id, await _tpl(session, seller, "autoconfirm_msg", deal))
-            await notify(
-                bot, session, tg, "system",
-                f"🤝 Автоподтверждение: заказ «{html.escape(deal.item_name)}» отмечен выполненным.",
-            )
+        if ready and (state.delivered or not only_delivered) and not state.autoconfirm_failed:
+            try:
+                await client.confirm_deal(deal.id)
+            except PlayerokError as e:
+                # Сообщаем один раз на заказ, чтобы не спамить каждые 30 секунд.
+                state.autoconfirm_failed = True
+                log.warning("Автоподтверждение %s: %s", deal.id, e)
+                await notify(
+                    bot, session, tg, "problem",
+                    f"⚠️ Не смог отметить заказ «{html.escape(deal.item_name)}» выполненным: "
+                    f"<code>{html.escape(str(e))[:300]}</code>\n"
+                    f"Отметь вручную: {_link(deal.deal_url, 'Открыть заказ')}\n"
+                    "Пришли этот текст разработчику — поправлю запрос.",
+                )
+            else:
+                state.sent_at = now
+                cur = "SENT"
+                if await ft.get_flag(session, tg, "autoconfirm_msg_enabled", True):
+                    await _say(client, deal.chat_id, await _tpl(session, seller, "autoconfirm_msg", deal))
+                await notify(
+                    bot, session, tg, "system",
+                    f"🤝 Автоподтверждение: заказ «{html.escape(deal.item_name)}» отмечен выполненным.",
+                )
     # --- продавец подтвердил вручную ---
     elif cur == "SENT" and prev != "SENT":
         state.sent_at = state.sent_at or now
