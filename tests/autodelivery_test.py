@@ -65,7 +65,7 @@ async def main():
     # 1. Первый заказ → выдан первый код
     DEALS.append(("d1", "PAID", "Malisonlif", "c1"))
     await sync_seller(bot, sessions, cipher, seller, notify=True)
-    assert CHAT["c1"][-1] == "Спасибо за покупку! Ваш промокод:\nE4Y8Y-PXC7B-3ZQ44", CHAT["c1"]
+    assert "Спасибо за покупку! Ваш промокод:\nE4Y8Y-PXC7B-3ZQ44" in CHAT["c1"], CHAT["c1"]
     assert await counts(sessions) == (2, 1)
     print("1. заказ d1 → выдан E4Y8Y, осталось 2")
 
@@ -86,7 +86,8 @@ async def main():
     # 4. Два новых заказа → по коду каждому, разные коды
     DEALS.extend([("d2", "PAID", "Buyer2", "c2"), ("d3", "PAID", "Buyer3", "c3")])
     await sync_seller(bot, sessions, cipher, seller, notify=True)
-    got = {CHAT["c2"][-1].split("\n")[-1], CHAT["c3"][-1].split("\n")[-1]}
+    code = lambda c: next(m for m in CHAT[c] if "Ваш промокод" in m).split("\n")[-1]
+    got = {code("c2"), code("c3")}
     assert got == {"NFGR7-BE3PH-YKN4E", "NEYZ5-9F9AZ-ZT36W"}, got
     assert await counts(sessions) == (0, 3)
     assert any("Запас закончился" in t or "закончился" in t for t in bot.sent), bot.sent

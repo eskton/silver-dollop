@@ -164,12 +164,20 @@ async def _process_deal(
     ):
         await _deliver(bot, session, seller, client, deal, state)
 
-    # --- автоподтверждение (сразу или с задержкой) ---
-    if cur == "PAID" and await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["autoconfirm"]):
-        only_delivered = await ft.get_flag(session, tg, "autoconfirm_only_delivered", True)
-        delay = await ft.get_param(session, tg, "autoconfirm_delay")
-        ready = now - state.first_seen_at >= timedelta(minutes=delay)
-        if ready and (state.delivered or not only_delivered) and not state.autoconfirm_failed:
+    # --- автоподтверждение: по настройкам функции «Автоподтверждение» или сразу
+    # после автовыдачи (флаг в разделе «Автовыдача», включён по умолчанию) ---
+    if cur == "PAID" and not state.autoconfirm_failed:
+        if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["autoconfirm"]):
+            only_delivered = await ft.get_flag(session, tg, "autoconfirm_only_delivered", True)
+            delay = await ft.get_param(session, tg, "autoconfirm_delay")
+            ready = now - state.first_seen_at >= timedelta(minutes=delay) and (
+                state.delivered or not only_delivered
+            )
+        else:
+            ready = bool(state.delivered) and await ft.get_flag(
+                session, tg, "autodelivery_confirm", True
+            )
+        if ready:
             try:
                 await client.confirm_deal(deal.id)
             except PlayerokError as e:

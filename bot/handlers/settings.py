@@ -308,6 +308,7 @@ async def render_autodelivery(
     tg = seller.tg_id
     async with sessions() as session:
         enabled = await ft.is_enabled(session, tg, feature)
+        confirm_after = await ft.get_flag(session, tg, "autodelivery_confirm", True)
         intro = await ft.get_template(session, tg, "delivery_msg")
         rows_db = await session.execute(
             select(
@@ -327,6 +328,8 @@ async def render_autodelivery(
         "(ключ, аккаунт, инструкция), выдаётся по одному на заказ.",
         "",
         f"<b>Статус:</b> {_status(enabled)}",
+        "<b>После выдачи:</b> "
+        + ("отмечаю заказ выполненным и прошу покупателя подтвердить" if confirm_after else "заказ не трогаю"),
         "",
         "<b>Текст перед товаром:</b>",
         ft.quote(intro),
@@ -340,8 +343,10 @@ async def render_autodelivery(
     lines += ["", "Нажми на лот, чтобы посмотреть остаток и управлять товарами."]
     rows = [
         [_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")],
+        [_btn(f"{'✅' if confirm_after else '☑️'} Отмечать заказ выполненным после выдачи", "ad:confirm")],
         [_btn("➕ Добавить товары", "ad:add")],
         [_btn("✏️ Текст перед товаром", f"f:{feature.key}:e:delivery_msg")],
+        [_btn("✏️ Сообщение «подтвердите заказ»", "f:autoconfirm:e:autoconfirm_msg")],
     ]
     rows += [[_btn(f"📦 {n[:24]} — {free}/{total}", f"ad:lot:{_h(n)}")] for n, free, total in lots]
     rows.append([_btn("‹ Назад", "st")])
@@ -777,3 +782,11 @@ async def relist_publish_now(cb: CallbackQuery, sessions: SessionFactory, cipher
     async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
         result = await _restore(client, sessions, seller.tg_id, item_id, "Лот")
     await cb.message.answer(result.replace("Лот", "Лот выставлен заново", 1) if result.startswith("✅") else result)
+
+
+@router.callback_query(F.data == "ad:confirm")
+async def toggle_confirm_after_delivery(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        cur = await ft.get_flag(session, cb.from_user.id, "autodelivery_confirm", True)
+        await ft.set_setting(session, cb.from_user.id, "autodelivery_confirm", "0" if cur else "1")
+    await _refresh(cb, sessions, ft.FEATURE_BY_KEY["autodelivery"])
