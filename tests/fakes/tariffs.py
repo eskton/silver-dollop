@@ -8,6 +8,9 @@ FREE_ID = "st-default"
 
 def tariff_response(op, v):
     """Ответ на item / itemPriorityStatuses или None, если запрос не про тарифы."""
+    if op.startswith("rest:"):
+        # REST «выставить снова» в этих тестах отказывает → проверяется запасной publishItem
+        return RawResponse(400, json.dumps({"message": "republish unavailable"}), None)
     if op == "item":
         return RawResponse(200, json.dumps({"data": {"item": {"id": v["id"], "price": 90}}}), None)
     if op == "itemPriorityStatuses":

@@ -247,9 +247,10 @@ class PlayerokClient:
             # не пускает IP хостинга): http://user:pass@host:port или socks5://...
             proxy = os.getenv("PLAYEROK_PROXY", "").strip() or None
             self._session = AsyncSession(impersonate="chrome", timeout=self._timeout, proxy=proxy)
+        rest_path = body.get("rest")
         resp = await self._session.post(
-            BASE_URL + "/graphql",
-            json=body,
+            BASE_URL + (rest_path or "/graphql"),
+            json=None if rest_path else body,
             headers=HEADERS,
             cookies={"token": token} if token else None,
         )
@@ -484,6 +485,39 @@ class PlayerokClient:
             "increaseItemPriorityStatus", q.INCREASE_ITEM_PRIORITY, {"input": {"itemId": item_id}}
         )
 
+    async def _rest_post(self, path: str) -> Any:
+        """POST в REST-часть сайта (/rest-api/public/...) тем же транспортом и cookie.
+        Ошибки — только PlayerokError: сессию по REST-ответу не сбрасываем."""
+        body = {"operationName": "rest:" + path, "rest": path, "variables": {}}
+        send = self._transport or self._curl_post
+        try:
+            resp = await send(body, self._token)
+        except Exception as e:
+            raise PlayerokError(f"Playerok недоступен: {e.__class__.__name__}") from e
+        try:
+            payload = json.loads(resp.text) if resp.text.strip() else None
+        except ValueError:
+            payload = None
+        failed = isinstance(payload, dict) and (
+            payload.get("success") is False or (payload.get("errors") and not payload.get("data"))
+        )
+        if 200 <= resp.status < 300 and not failed:
+            return payload
+        msg = ""
+        if isinstance(payload, dict):
+            msg = str(payload.get("message") or payload.get("error") or "")
+            errs = payload.get("errors")
+            if not msg and isinstance(errs, list) and errs and isinstance(errs[0], dict):
+                msg = str(errs[0].get("message") or "")
+        if not msg:
+            msg = " ".join(resp.text.split())[:200] or "пустой ответ"
+        raise PlayerokError(f"HTTP {resp.status}: {msg}")
+
+    async def republish_item(self, item_id: str) -> None:
+        """«Выставить снова» проданный/снятый лот — так делает кнопка на сайте
+        (REST /item/{id}/republish, как в библиотеке PlayerokAPI)."""
+        await self._rest_post(f"/rest-api/public/item/{item_id}/republish")
+
     async def item_price(self, item_id: str) -> float | None:
         data = await self._gql("item", q.ITEM_PRICE, {"id": item_id})
         price = _get(data, "item", "price")
@@ -492,7 +526,23 @@ class PlayerokClient:
     async def publish_item(
         self, item_id: str, *, price: float | None = None, allow_paid: bool = False
     ) -> None:
-        """Выставляет лот заново. Playerok требует тариф (priorityStatuses) и способ
+        """Выставляет лот заново: сначала как кнопка «Выставить снова» на сайте,
+        при отказе — через GraphQL publishItem с бесплатным тарифом."""
+        try:
+            await self.republish_item(item_id)
+            return
+        except PlayerokError as e:
+            log.warning("republish %s не прошёл: %s — пробую publishItem", item_id, e)
+            rest_error = str(e)
+        try:
+            await self._publish_graphql(item_id, price=price, allow_paid=allow_paid)
+        except PlayerokError as e:
+            raise PlayerokError(f"{e} (republish: {rest_error})") from e
+
+    async def _publish_graphql(
+        self, item_id: str, *, price: float | None = None, allow_paid: bool = False
+    ) -> None:
+        """Публикация через GraphQL. Playerok требует тариф (priorityStatuses) и способ
         оплаты (transactionProviderId) даже для бесплатного размещения: берём тариф
         DEFAULT, оплата LOCAL (с баланса) — при бесплатном тарифе списаний нет."""
         try:
