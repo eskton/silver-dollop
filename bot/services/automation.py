@@ -28,6 +28,7 @@ from ..db import (
 )
 from ..playerok import AuthRequired, ChatPreview, Deal, Item, PlayerokClient, PlayerokError
 from ..crypto import TokenCipher
+from ..logs import tag
 from . import features as ft
 from ..plugins.stars import service as stars_svc
 from .notifications import notify
@@ -93,9 +94,9 @@ async def process_deals(
             try:
                 await _process_deal(bot, session, seller, client, deal, act=act)
             except PlayerokError as e:
-                log.warning("Сделка %s продавца %s: %s", deal.id, seller.tg_id, e)
+                log.warning("%s сделка %s: %s", tag(seller.tg_id), deal.id, e)
             except Exception:
-                log.exception("Сделка %s продавца %s", deal.id, seller.tg_id)
+                log.exception("%s сделка %s: сбой обработки", tag(seller.tg_id), deal.id)
             await session.commit()
 
 
@@ -183,7 +184,7 @@ async def _process_deal(
             except PlayerokError as e:
                 # Сообщаем один раз на заказ, чтобы не спамить каждые 30 секунд.
                 state.autoconfirm_failed = True
-                log.warning("Автоподтверждение %s: %s", deal.id, e)
+                log.warning("%s автоподтверждение: Playerok отказал для сделки %s: %s", tag(tg), deal.id, e)
                 await notify(
                     bot, session, tg, "problem",
                     f"⚠️ Не смог отметить заказ «{html.escape(deal.item_name)}» выполненным: "
@@ -194,6 +195,7 @@ async def _process_deal(
             else:
                 state.sent_at = now
                 cur = "SENT"
+                log.info("%s автоподтверждение: сделка %s отмечена выполненной", tag(tg), deal.id)
                 if await ft.get_flag(session, tg, "autoconfirm_msg_enabled", True):
                     await _say(client, deal.chat_id, await _tpl(session, seller, "autoconfirm_msg", deal))
                 await notify(
@@ -207,15 +209,16 @@ async def _process_deal(
             await _say(client, deal.chat_id, await _tpl(session, seller, "after_seller_confirm", deal))
 
     # --- лот продан → выставить заново (по сделке, без списка лотов) ---
-    if (
-        cur in SOLD_DEAL_STATUSES
-        and state.relisted is False  # только сделки, появившиеся после этой версии
-        and deal.item_id
-        and now - (state.created_at or state.first_seen_at or now) <= timedelta(hours=48)
-        and await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["relist"])
-        and await relist_allowed(session, tg, deal.item_name, deal.item_url)
-    ):
-        await relist_after_sale(bot, session, seller, client, deal, state)
+    if cur in SOLD_DEAL_STATUSES and state.relisted is not True:
+        reason = await _relist_skip_reason(session, tg, deal, state, now)
+        if reason is None:
+            log.info("%s перевыставление: сделка %s, лот %s «%s» — выставляю",
+                     tag(tg), deal.id, deal.item_id, deal.item_name)
+            await relist_after_sale(bot, session, seller, client, deal, state)
+        else:
+            _log_once(tg, deal.id, reason,
+                      "%s перевыставление: сделка %s «%s» пропущена — %s",
+                      tag(tg), deal.id, deal.item_name, reason)
 
     # --- покупатель подтвердил ---
     if cur in BUYER_CONFIRMED and prev not in BUYER_CONFIRMED:
@@ -409,6 +412,7 @@ async def _deliver(
     item.used_deal_id = deal.id
     item.used_at = _now()
     state.delivered = True
+    log.info("%s автовыдача: сделка %s «%s» — товар выдан", tag(seller.tg_id), deal.id, deal.item_name)
     left = await session.scalar(
         select(func.count(DeliveryItem.id)).where(
             DeliveryItem.seller_tg_id == seller.tg_id,
@@ -447,9 +451,9 @@ async def process_chats(
             try:
                 await _process_chat(session, seller, client, chat, act=act, bot=bot, cipher=cipher)
             except PlayerokError as e:
-                log.warning("Чат %s продавца %s: %s", chat.id, seller.tg_id, e)
+                log.warning("%s чат %s: %s", tag(seller.tg_id), chat.id, e)
             except Exception:
-                log.exception("Чат %s продавца %s", chat.id, seller.tg_id)
+                log.exception("%s чат %s: сбой обработки", tag(seller.tg_id), chat.id)
             await session.commit()
 
 
@@ -546,7 +550,7 @@ async def process_items(
         try:
             items = await client.my_items(seller.playerok_id or "")
         except (AuthRequired, PlayerokError) as e:
-            log.warning("Лоты продавца %s недоступны: %s", tg, e)
+            log.warning("%s список лотов недоступен: %s", tag(tg), e)
             return
         now = _now()
 
@@ -566,7 +570,7 @@ async def process_items(
                 try:
                     await client.bump_item(item.id)
                 except PlayerokError as e:
-                    log.warning("Поднятие %s у %s: %s", item.id, tg, e)
+                    log.warning("%s поднятие лота %s: %s", tag(tg), item.id, e)
                     continue
                 spent += cost
                 session.add(ActionLog(seller_tg_id=tg, kind="bump", target=item.id, cost=cost))
@@ -583,13 +587,44 @@ async def process_items(
                 try:
                     await client.publish_item(item.id)
                 except PlayerokError as e:
-                    log.warning("Перевыставление %s у %s: %s", item.id, tg, e)
+                    log.warning("%s перевыставление (по списку) лота %s: %s", tag(tg), item.id, e)
                     continue
                 session.add(ActionLog(seller_tg_id=tg, kind="relist", target=item.id))
                 await session.commit()
                 await notify(
                     bot, session, tg, "relisted", f"🔁 Выставил заново лот «{html.escape(item.name)}»."
                 )
+
+
+_LOGGED: set[tuple[int, str, str]] = set()
+
+
+def _log_once(tg: int, deal_id: str, reason: str, msg: str, *args) -> None:
+    """Пишет причину пропуска один раз на сделку, а не каждые 30 секунд."""
+    key = (tg, deal_id, reason)
+    if key in _LOGGED:
+        return
+    if len(_LOGGED) > 20000:
+        _LOGGED.clear()
+    _LOGGED.add(key)
+    log.info(msg, *args)
+
+
+async def _relist_skip_reason(
+    session: AsyncSession, tg: int, deal: Deal, state: DealState, now: datetime
+) -> str | None:
+    """None — выставлять; иначе человекочитаемая причина, почему нет."""
+    if state.relisted is None:
+        return "сделка была в базе до включения перевыставления по сделке"
+    if not deal.item_id:
+        return "Playerok не вернул ID лота в сделке"
+    if now - (state.created_at or state.first_seen_at or now) > timedelta(hours=48):
+        return "сделка старше 48 ч"
+    if not await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["relist"]):
+        return "функция «Автовыставление лотов» выключена"
+    if not await relist_allowed(session, tg, deal.item_name, deal.item_url):
+        return "лот не подходит под правила отбора"
+    return None
 
 
 async def relist_allowed(session: AsyncSession, tg: int, name: str, url: str) -> bool:
@@ -611,7 +646,8 @@ async def relist_after_sale(
     try:
         await client.publish_item(deal.item_id)
     except PlayerokError as e:
-        log.warning("Перевыставление %s (сделка %s): %s", deal.item_id, deal.id, e)
+        log.warning("%s перевыставление: Playerok отказал для лота %s (сделка %s): %s",
+                    tag(tg), deal.item_id, deal.id, e)
         await notify(
             bot, session, tg, "problem",
             f"⚠️ Не смог выставить заново «{html.escape(deal.item_name)}»: "
@@ -621,6 +657,7 @@ async def relist_after_sale(
         )
         return
     session.add(ActionLog(seller_tg_id=tg, kind="relist", target=deal.item_id))
+    log.info("%s перевыставление: лот %s выставлен заново (сделка %s)", tag(tg), deal.item_id, deal.id)
     await notify(
         bot, session, tg, "relisted",
         f"🔁 Выставил заново «{html.escape(deal.item_name)}» — {_link(deal.item_url, 'Открыть лот')}",

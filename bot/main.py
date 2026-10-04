@@ -21,6 +21,7 @@ COMMANDS = [
     BotCommand(command="stats", description="Аналитика продаж"),
     BotCommand(command="profile", description="Профиль: уведомления, заказы, клиенты"),
     BotCommand(command="notify", description="Настройки уведомлений"),
+    BotCommand(command="logs", description="Логи бота файлом"),
     BotCommand(command="help", description="Помощь"),
     BotCommand(command="cancel", description="Отменить действие"),
 ]
@@ -34,6 +35,12 @@ async def main() -> None:
         stream=sys.stdout,
     )
     settings = load_settings()
+    try:
+        from .logs import setup_file_logging
+
+        logging.info("Логи пишутся в %s", setup_file_logging())
+    except OSError as e:  # нет доступа к диску — работаем без файла
+        logging.warning("Не удалось открыть файл логов: %s", e)
     cipher = TokenCipher(settings.secret_key)
     # Логируем, где реально лежит база и сохранилась ли она — так по логам после
     # перезапуска видно, работает ли том (volume) и не обнулилась ли база.

@@ -14,6 +14,7 @@ from ..config import Settings
 from ..crypto import TokenCipher
 from ..db import SeenEvent, Seller, SessionFactory
 from ..keyboards import deal_kb, main_menu
+from ..logs import tag
 from ..playerok import AuthRequired, ChatPreview, Deal, PlayerokClient, PlayerokError
 from ..playerok.client import ACTIVE_SALE_STATUSES
 from . import automation, notifications
@@ -51,7 +52,7 @@ async def poll_once(bot: Bot, sessions: SessionFactory, cipher: TokenCipher) -> 
         try:
             await sync_seller(bot, sessions, cipher, seller)
         except AuthRequired:
-            log.info("Сессия продавца %s истекла", seller.tg_id)
+            log.info("%s сессия Playerok истекла", tag(seller.tg_id))
             await disconnect_seller(sessions, seller.tg_id)
             await bot.send_message(
                 seller.tg_id,
@@ -59,9 +60,9 @@ async def poll_once(bot: Bot, sessions: SessionFactory, cipher: TokenCipher) -> 
                 reply_markup=main_menu(False),
             )
         except PlayerokError as e:
-            log.warning("Playerok, продавец %s: %s", seller.tg_id, e)
+            log.warning("%s ошибка Playerok: %s", tag(seller.tg_id), e)
         except Exception:
-            log.exception("Не удалось обработать продавца %s", seller.tg_id)
+            log.exception("%s сбой обработки продавца", tag(seller.tg_id))
 
 
 async def sync_seller(
