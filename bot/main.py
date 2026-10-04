@@ -63,7 +63,7 @@ async def main() -> None:
             )
         logging.info("В базе: продавцов %s, товаров автовыдачи %s (выдано %s)", sellers, items, used)
 
-    bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
     dp = Dispatcher()
     dp.include_router(build_router())
     # Эти объекты aiogram подставляет в обработчики по имени аргумента.

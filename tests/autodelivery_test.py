@@ -14,11 +14,12 @@ LOT = "💰 100 РОБУКСОВ | ПРОМОКОД | ВЫДАЧА ЗА 1 СЕК
 DEALS = []          # (id, status, buyer, chat)
 CHAT = {}           # chat_id -> [сообщения]
 CONFIRMED = []
+NOW = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 async def pk(body, token):
     op, v = body["operationName"], body["variables"]
     if op == "deals":
-        edges = [{"node": {"id": d, "status": st, "createdAt": "2026-10-03T01:00:00Z",
+        edges = [{"node": {"id": d, "status": st, "createdAt": NOW,
                            "item": {"id": "i1", "slug": "robux", "name": LOT, "price": 90},
                            "user": {"id": b, "username": b}, "chat": {"id": c}}} for d, st, b, c in DEALS]
         return RawResponse(200, json.dumps({"data": {"deals": {"pageInfo": {"hasNextPage": False}, "edges": edges}}}), None)

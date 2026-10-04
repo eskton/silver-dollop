@@ -87,6 +87,36 @@ async def main():
     assert len(errs) == 1 and "Item cannot be published" in errs[0], errs
     print("4. ошибка → одно уведомление с текстом")
 
+    # экран автовыставления показывает, что будет с лотами после продаж
+    from bot.handlers.settings import render_relist
+    M["fail"] = False
+    async with sessions() as s:
+        await ft.set_setting(s, 1, "relist_enabled", "0")
+    M["deals"].append(("d5", "PAID", "item-100c", "100 робуксов VIP"))
+    await sync_seller(bot, sessions, cipher, seller, notify=True)
+    async with sessions() as s:
+        await ft.set_setting(s, 1, "relist_enabled", "1")
+        seller_row = await get_or_create_seller(s, SimpleNamespace(id=1, username="u"))
+    text, kb = await render_relist(sessions, seller_row, ft.FEATURE_BY_KEY["relist"])
+    assert "50 робуксов</a> — ✅ выставлен заново" in text, text
+    assert "Ключ Steam</a> — ⏸ не будет: лот не подходит под правила отбора" in text, text
+    assert "❌ ошибка: Item cannot be published" in text, text
+    assert "100 робуксов VIP</a> — ⏳ будет выставлен" in text, text
+    assert "Старый</a> — ⏸ не будет: сделка была в базе до" in text, text
+    btns = [b.callback_data for r in kb.inline_keyboard for b in r]
+    assert "rl:pub:item-100b" in btns and "rl:pub:item-x" in btns and "rl:pub:item-50" not in btns, btns
+    print("5. экран показывает судьбу лотов после продаж")
+
+    # следующий опрос выставляет ожидающий лот; ручное выставление помечает сделку
+    await sync_seller(bot, sessions, cipher, seller, notify=True)
+    assert M["published"][-1] == "item-100c", M["published"]
+    from bot.handlers.settings import _restore
+    async with PlayerokClient("T") as c:
+        assert (await _restore(c, sessions, 1, "item-100b", "100 робуксов")).startswith("✅")
+    text, kb = await render_relist(sessions, seller_row, ft.FEATURE_BY_KEY["relist"])
+    assert "❌" not in text and "⏳" not in text, text
+    print("6. после выставления статусы обновляются")
+
     kb = deal_kb("chat1", "11111111-2222-3333-4444-555555555555")
     assert [b.callback_data for r in kb.inline_keyboard for b in r][-1].startswith("rl:pub:")
     print("OK")

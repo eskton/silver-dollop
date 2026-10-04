@@ -11,16 +11,16 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
-from ..db import AutoReply, DeliveryItem, RelistRule, Seller, SessionFactory, Template
+from ..db import AutoReply, DealState, DeliveryItem, RelistRule, Seller, SessionFactory, Template
 from ..crypto import TokenCipher
 from ..keyboards import is_cancel, BTN_SETTINGS, cancel_kb, main_menu
 from ..playerok import AuthRequired, PlayerokClient, PlayerokError
 from ..plugins import PAID_PLUGINS
 from ..plugins.access import has_access
 from ..services import features as ft
-from ..services.automation import relist_candidates
+from ..services.automation import relist_after_sale_overview, relist_candidates
 from ..services.sellers import get_or_create_seller
 
 router = Router(name="settings")
@@ -606,6 +606,10 @@ async def reply_del(cb: CallbackQuery, sessions: SessionFactory) -> None:
 # ===================== автовыставление =====================
 
 
+def _a(url: str | None, text: str) -> str:
+    return f'<a href="{html.escape(url, quote=True)}">{text}</a>' if url else text
+
+
 async def render_relist(
     sessions: SessionFactory, seller: Seller, feature: ft.Feature
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -617,6 +621,7 @@ async def render_relist(
         interval = await ft.get_param(session, tg, "relist_interval_hours")
         rules = list(await session.scalars(select(RelistRule).where(RelistRule.seller_tg_id == tg)))
         toggle_rows = await _toggle_rows(session, tg, feature)
+        sold = await relist_after_sale_overview(session, tg)
     lines = [
         f"<b>{feature.title}</b>",
         "",
@@ -630,12 +635,25 @@ async def render_relist(
     ]
     if rules:
         lines += [""] + [f"• {html.escape(r.pattern)}" for r in rules]
+    lines += ["", "<b>Лоты после продаж (48 ч):</b>"]
+    if sold:
+        lines += [
+            f"• {_a(st.item_url, html.escape(st.item_name or 'Лот'))} — {html.escape(note)}"
+            for st, note, _ in sold
+        ]
+    else:
+        lines.append("пока продаж не было")
     lines += ["", feature.note]
     rows = [[_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")]]
     rows.append([_btn(f"⏱ Интервал: {interval} ч.", f"f:{feature.key}:p:relist_interval_hours")])
     rows += toggle_rows
     rows.append([_btn("➕ Добавить правило (слово/ссылка)", "rl:add")])
     rows += [[_btn(f"🗑 {r.pattern[:30]}", f"rl:del:{r.id}")] for r in rules]
+    seen: set[str] = set()
+    for st, _, manual in sold:
+        if manual and st.item_id not in seen and len(f"rl:pub:{st.item_id}".encode()) <= 64:
+            seen.add(st.item_id)
+            rows.append([_btn(f"🔄 {(st.item_name or 'Лот')[:28]}", f"rl:pub:{st.item_id}")])
     rows.append([_btn("👁 Показать и восстановить вручную", "rl:preview")])
     rows.append([_btn("‹ Назад", "st")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
@@ -723,6 +741,12 @@ async def _restore(client: PlayerokClient, sessions: SessionFactory, tg: int, it
         return f"❌ {html.escape(name)}: {html.escape(str(e))[:150]}"
     async with sessions() as session:
         session.add(ActionLog(seller_tg_id=tg, kind="relist", target=item_id))
+        # продажи с этим лотом считаем обработанными — автоматом второй раз не выставлять
+        await session.execute(
+            update(DealState)
+            .where(DealState.seller_tg_id == tg, DealState.item_id == item_id)
+            .values(relisted=True, relist_note="ok")
+        )
         await session.commit()
     return f"✅ {html.escape(name)}"
 

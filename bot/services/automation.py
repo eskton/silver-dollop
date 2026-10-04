@@ -210,7 +210,7 @@ async def _process_deal(
 
     # --- лот продан → выставить заново (по сделке, без списка лотов) ---
     if cur in SOLD_DEAL_STATUSES and state.relisted is not True:
-        reason = await _relist_skip_reason(session, tg, deal, state, now)
+        reason = await relist_skip_reason(session, tg, state, now)
         if reason is None:
             log.info("%s перевыставление: сделка %s, лот %s «%s» — выставляю",
                      tag(tg), deal.id, deal.item_id, deal.item_name)
@@ -324,6 +324,9 @@ def _update_analytics(state: DealState, deal: Deal) -> None:
         state.review_rating = deal.review_rating
     if deal.item_name:
         state.item_name = deal.item_name
+    if deal.item_id:
+        state.item_id = deal.item_id
+        state.item_url = deal.item_url
 
 
 def norm_lot(name: str | None) -> str:
@@ -621,21 +624,57 @@ def _log_once(tg: int, deal_id: str, reason: str, msg: str, *args) -> None:
     log.info(msg, *args)
 
 
-async def _relist_skip_reason(
-    session: AsyncSession, tg: int, deal: Deal, state: DealState, now: datetime
+async def relist_skip_reason(
+    session: AsyncSession, tg: int, state: DealState, now: datetime
 ) -> str | None:
     """None — выставлять; иначе человекочитаемая причина, почему нет."""
     if state.relisted is None:
         return "сделка была в базе до включения перевыставления по сделке"
-    if not deal.item_id:
+    if not state.item_id:
         return "Playerok не вернул ID лота в сделке"
     if now - (state.created_at or state.first_seen_at or now) > timedelta(hours=48):
         return "сделка старше 48 ч"
     if not await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["relist"]):
         return "функция «Автовыставление лотов» выключена"
-    if not await relist_allowed(session, tg, deal.item_name, deal.item_url):
+    if not await relist_allowed(session, tg, state.item_name, state.item_url or ""):
         return "лот не подходит под правила отбора"
     return None
+
+
+RELIST_WINDOW = timedelta(hours=48)
+
+
+async def relist_after_sale_overview(
+    session: AsyncSession, tg: int, limit: int = 15
+) -> list[tuple[DealState, str, bool]]:
+    """Продажи за 48 ч и что с их лотами: (сделка, пометка, можно ли выставить вручную).
+    Только по базе, без запросов к Playerok."""
+    now = _now()
+    states = list(await session.scalars(
+        select(DealState)
+        .where(
+            DealState.seller_tg_id == tg,
+            DealState.status.in_(SOLD_DEAL_STATUSES),
+            DealState.first_seen_at >= now - RELIST_WINDOW,
+        )
+        .order_by(DealState.first_seen_at.desc())
+        .limit(limit)
+    ))
+    result = []
+    for st in states:
+        if st.relist_note == "ok":
+            result.append((st, "✅ выставлен заново", False))
+        elif st.relist_note:
+            result.append((st, "❌ " + st.relist_note, bool(st.item_id)))
+        elif st.relisted is True:
+            result.append((st, "⏸ уже обработан ранее", bool(st.item_id)))
+        else:
+            reason = await relist_skip_reason(session, tg, st, now)
+            if reason is None:
+                result.append((st, "⏳ будет выставлен на ближайшем опросе", False))
+            else:
+                result.append((st, "⏸ не будет: " + reason, bool(st.item_id)))
+    return result
 
 
 async def relist_allowed(session: AsyncSession, tg: int, name: str, url: str) -> bool:
@@ -659,6 +698,7 @@ async def relist_after_sale(
     except PlayerokError as e:
         log.warning("%s перевыставление: Playerok отказал для лота %s (сделка %s): %s",
                     tag(tg), deal.item_id, deal.id, e)
+        state.relist_note = f"ошибка: {e}"[:255]
         await notify(
             bot, session, tg, "problem",
             f"⚠️ Не смог выставить заново «{html.escape(deal.item_name)}»: "
@@ -667,6 +707,7 @@ async def relist_after_sale(
             "Пришли этот текст разработчику — поправлю запрос.",
         )
         return
+    state.relist_note = "ok"
     session.add(ActionLog(seller_tg_id=tg, kind="relist", target=deal.item_id))
     log.info("%s перевыставление: лот %s выставлен заново (сделка %s)", tag(tg), deal.item_id, deal.id)
     await notify(

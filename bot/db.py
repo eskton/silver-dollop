@@ -127,6 +127,8 @@ class DealState(Base):
     deal_id: Mapped[str] = mapped_column(String(128))
     chat_id: Mapped[str | None] = mapped_column(String(128))
     item_name: Mapped[str] = mapped_column(String(255), default="")
+    item_id: Mapped[str | None] = mapped_column(String(128))
+    item_url: Mapped[str | None] = mapped_column(String(512))
     status: Mapped[str] = mapped_column(String(32), default="")
     # Для аналитики: цена, покупатель, когда создан заказ на Playerok, оценка.
     price: Mapped[float | None] = mapped_column(Float)
@@ -140,6 +142,7 @@ class DealState(Base):
     autoconfirm_failed: Mapped[bool | None] = mapped_column(Boolean, default=False)
     stock_alerted: Mapped[bool | None] = mapped_column(Boolean, default=False)
     relisted: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    relist_note: Mapped[str | None] = mapped_column(String(255))  # итог перевыставления
     confirm_reminded_at: Mapped[datetime | None] = mapped_column(DateTime)
     confirm_reminders: Mapped[int] = mapped_column(Integer, default=0)
     review_reminded: Mapped[bool] = mapped_column(Boolean, default=False)
