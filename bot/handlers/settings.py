@@ -711,10 +711,10 @@ async def relist_preview(cb: CallbackQuery, sessions: SessionFactory, cipher: To
     candidates, error = await _fetch_candidates(sessions, seller, cipher)
     if error:
         await cb.message.answer(
-            "⚠️ Не удалось получить лоты с Playerok:\n"
-            f"<code>{html.escape(error)}</code>\n\n"
-            "Это не выкидывает вас из аккаунта — продажи и чаты работают. "
-            "Если повторяется, пришлите этот текст разработчику."
+            "ℹ️ Playerok не отдаёт боту общий список лотов "
+            f"(<code>{html.escape(error)[:120]}</code>).\n\n"
+            "Проданные лоты выставляются заново и без него — они перечислены на экране "
+            "«Автовыставление»: жми «🔄» рядом с нужным лотом."
         )
         return
     if not candidates:
