@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
