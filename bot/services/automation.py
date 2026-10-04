@@ -550,7 +550,17 @@ async def process_items(
         try:
             items = await client.my_items(seller.playerok_id or "")
         except (AuthRequired, PlayerokError) as e:
-            log.warning("%s список лотов недоступен: %s", tag(tg), e)
+            # Пишем не чаще раза в 6 ч: перевыставление после продажи этот список
+            # не использует, от него зависят только автоподнятие и ручной просмотр.
+            now_ = _now()
+            last = _ITEMS_WARNED.get(tg)
+            if last is None or now_ - last > timedelta(hours=6):
+                _ITEMS_WARNED[tg] = now_
+                log.warning(
+                    "%s список лотов недоступен (%s) — автоподнятие и «Показать лоты» не работают; "
+                    "перевыставление после продажи работает без списка",
+                    tag(tg), e,
+                )
             return
         now = _now()
 
@@ -597,6 +607,7 @@ async def process_items(
 
 
 _LOGGED: set[tuple[int, str, str]] = set()
+_ITEMS_WARNED: dict[int, datetime] = {}
 
 
 def _log_once(tg: int, deal_id: str, reason: str, msg: str, *args) -> None:
