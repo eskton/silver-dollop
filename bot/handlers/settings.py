@@ -735,8 +735,18 @@ async def relist_preview(cb: CallbackQuery, sessions: SessionFactory, cipher: To
 async def _restore(client: PlayerokClient, sessions: SessionFactory, tg: int, item_id: str, name: str) -> str:
     from ..db import ActionLog
 
+    async with sessions() as session:
+        allow_paid = await ft.get_flag(session, tg, "relist_paid_allowed", False)
+        known = await session.scalar(
+            select(DealState).where(DealState.seller_tg_id == tg, DealState.item_id == item_id)
+            .order_by(DealState.id.desc()).limit(1)
+        )
+    if known is not None and name == "Лот":
+        name = known.item_name or name
     try:
-        await client.publish_item(item_id)
+        await client.publish_item(
+            item_id, price=known.price if known is not None else None, allow_paid=allow_paid
+        )
     except (AuthRequired, PlayerokError) as e:
         return f"❌ {html.escape(name)}: {html.escape(str(e))[:150]}"
     async with sessions() as session:
@@ -805,7 +815,7 @@ async def relist_publish_now(cb: CallbackQuery, sessions: SessionFactory, cipher
     await cb.answer("Выставляю…")
     async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
         result = await _restore(client, sessions, seller.tg_id, item_id, "Лот")
-    await cb.message.answer(result.replace("Лот", "Лот выставлен заново", 1) if result.startswith("✅") else result)
+    await cb.message.answer(result.replace("✅ ", "✅ Выставлен заново: ", 1))
 
 
 @router.callback_query(F.data == "ad:confirm")

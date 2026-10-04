@@ -7,6 +7,7 @@ logging.basicConfig(level=logging.INFO, stream=open(os.devnull, "w"))
 from bot import logs as L
 from bot.crypto import TokenCipher
 from bot.db import init_db
+from tests.fakes.tariffs import check_publish, tariff_response
 from bot.playerok.client import PlayerokClient, RawResponse
 from bot.services import features as ft
 from bot.services.poller import sync_seller
@@ -17,6 +18,9 @@ NOW = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 M = {"deals": [], "pub_fail": False}
 async def pk(body, token):
     op, v = body["operationName"], body["variables"]
+    _t = tariff_response(op, v)
+    if _t: return _t
+    if op == "publishItem": check_publish(v)
     if op == "deals":
         edges = [{"node": {"id": d, "status": "PAID", "createdAt": NOW, "item": {"id": i, "name": n, "price": 5},
                            "user": {"id": "b", "username": "buyer"}, "chat": {"id": "c" + d}}} for d, i, n in M["deals"]]

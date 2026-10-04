@@ -484,8 +484,45 @@ class PlayerokClient:
             "increaseItemPriorityStatus", q.INCREASE_ITEM_PRIORITY, {"input": {"itemId": item_id}}
         )
 
-    async def publish_item(self, item_id: str) -> None:
-        await self._gql("publishItem", q.PUBLISH_ITEM, {"input": {"itemId": item_id}})
+    async def item_price(self, item_id: str) -> float | None:
+        data = await self._gql("item", q.ITEM_PRICE, {"id": item_id})
+        price = _get(data, "item", "price")
+        return float(price) if isinstance(price, (int, float)) else None
+
+    async def publish_item(
+        self, item_id: str, *, price: float | None = None, allow_paid: bool = False
+    ) -> None:
+        """Выставляет лот заново. Playerok требует тариф (priorityStatuses) и способ
+        оплаты (transactionProviderId) даже для бесплатного размещения: берём тариф
+        DEFAULT, оплата LOCAL (с баланса) — при бесплатном тарифе списаний нет."""
+        try:
+            price = await self.item_price(item_id) or price
+        except PlayerokError:
+            if price is None:
+                raise
+        if price is None:
+            raise PlayerokError("Playerok не отдал цену лота — без неё не выбрать тариф размещения")
+        data = await self._gql(
+            "itemPriorityStatuses", q.ITEM_PRIORITY_STATUSES, {"itemId": item_id, "price": price}
+        )
+        statuses = [s for s in (_get(data, "itemPriorityStatuses") or []) if isinstance(s, dict)]
+        free = next((s for s in statuses if str(s.get("type")).upper() == "DEFAULT"), None)
+        if free is None:
+            raise PlayerokError("Playerok не предложил обычный (бесплатный) тариф размещения")
+        cost = free.get("price") or 0
+        if cost and not allow_paid:
+            raise PlayerokError(
+                f"размещение платное ({cost:g} ₽), а платное восстановление выключено в настройках"
+            )
+        await self._gql(
+            "publishItem",
+            q.PUBLISH_ITEM,
+            {"input": {
+                "itemId": item_id,
+                "priorityStatuses": [free["id"]],
+                "transactionProviderId": "LOCAL",
+            }},
+        )
 
     # ----- чаты -----
 

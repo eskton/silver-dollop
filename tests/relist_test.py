@@ -5,6 +5,7 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]
 from sqlalchemy import select, func
 from bot.crypto import TokenCipher
 from bot.db import init_db, ActionLog, Seller
+from tests.fakes.tariffs import check_publish, tariff_response
 from bot.playerok.client import PlayerokClient, RawResponse
 from bot.playerok import AuthRequired, PlayerokError
 from bot.services import features as ft
@@ -15,6 +16,9 @@ from bot.services.sellers import get_or_create_seller
 MODE = {"items_fail": None, "published": []}
 async def pk(body, token):
     op, v = body["operationName"], body["variables"]
+    _t = tariff_response(op, v)
+    if _t: return _t
+    if op == "publishItem": check_publish(v)
     if op == "deals": return RawResponse(200, json.dumps({"data":{"deals":{"pageInfo":{"hasNextPage":False},"edges":[]}}}), None)
     if op == "chats": return RawResponse(200, json.dumps({"data":{"chats":{"edges":[]}}}), None)
     if op == "items":

@@ -5,6 +5,7 @@ os.environ["SECRET_KEY"] = __import__("cryptography.fernet", fromlist=["Fernet"]
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from bot.crypto import TokenCipher
 from bot.db import init_db, DealState, RelistRule
+from tests.fakes.tariffs import check_publish, tariff_response
 from bot.playerok.client import PlayerokClient, RawResponse
 from bot.services import features as ft
 from bot.services.poller import sync_seller
@@ -15,6 +16,9 @@ M = {"deals": [], "published": [], "fail": False}
 NOW = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 async def pk(body, token):
     op, v = body["operationName"], body["variables"]
+    _t = tariff_response(op, v)
+    if _t: return _t
+    if op == "publishItem": check_publish(v)
     if op == "deals":
         edges = [{"node": {"id": d, "status": st, "createdAt": NOW,
                            "item": {"id": iid, "slug": iid, "name": name, "price": 5},

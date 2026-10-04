@@ -119,6 +119,26 @@ mutation publishItem($input: PublishItemInput!) {
 }
 """
 
+ITEM_PRICE = """
+query item($id: UUID) {
+  item(id: $id) {
+    id
+    price
+  }
+}
+"""
+
+ITEM_PRIORITY_STATUSES = """
+query itemPriorityStatuses($itemId: UUID, $price: NonNegativeFloat!) {
+  itemPriorityStatuses(itemId: $itemId, price: $price) {
+    id
+    name
+    type
+    price
+  }
+}
+"""
+
 UPDATE_DEAL = """
 mutation updateDeal($input: UpdateItemDealInput!) {
   updateDeal(input: $input) {

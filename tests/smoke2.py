@@ -17,6 +17,7 @@ from bot.crypto import TokenCipher
 from bot.db import AutoReply, DealState, DeliveryItem, init_db
 from bot.handlers import build_router
 from bot.handlers.settings import render_feature
+from tests.fakes.tariffs import check_publish, tariff_response
 from bot.playerok import PlayerokClient
 from bot.playerok import client as client_mod
 from bot.services import automation, features as ft
@@ -48,6 +49,9 @@ STATE = {"deal_status": "PAID", "review": None, "msg": None, "unread": 0, "confi
 
 def handler(body, token):
     op, v = body["operationName"], body["variables"]
+    _t = tariff_response(op, v)
+    if _t: return _t
+    if op == "publishItem": check_publish(v)
     if op == "deals":
         assert "status" not in v["filter"]
         node = {"id": "d1", "status": STATE["deal_status"], "createdAt": "x",

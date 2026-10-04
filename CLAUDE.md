@@ -70,8 +70,10 @@ volume.
 - Перевыставление теперь идёт прямо по сделке (`relist_after_sale`, ID лота из сделки),
   без списка лотов; плюс кнопка «🔄 Выставить заново» в уведомлении о заказе. Работает
   только для сделок, появившихся после этой версии (`DealState.relisted is False`; у
-  старых строк NULL). Мутация `publishItem` вживую не подтверждена — при ошибке бот
-  шлёт её текст. Платный ли статус размещения, по сделке не узнать.
+  старых строк NULL). `publishItem` вживую ответил: обязателен `transactionProviderId`.
+  Теперь (как в библиотеке PlayerokAPI): цена лота (`item`) → `itemPriorityStatuses` →
+  тариф `DEFAULT` → `publishItem {itemId, priorityStatuses:[id], transactionProviderId:"LOCAL"}`.
+  Если DEFAULT платный и «Платное восстановление» выключено — отказ с текстом.
   Экран «Автовыставление» показывает продажи за 48 ч и судьбу лота (✅/❌/⏳/⏸ с
   причиной) по `DealState.item_id/item_url/relist_note`, без запроса к Playerok.
 - Поднятие лота (`increaseItemPriorityStatus`), перевыставление (`publishItem`),

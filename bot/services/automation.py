@@ -598,7 +598,8 @@ async def process_items(
                 if last and now - last < interval:
                     continue
                 try:
-                    await client.publish_item(item.id)
+                    await client.publish_item(item.id, price=item.price, allow_paid=await ft.get_flag(
+                        session, tg, "relist_paid_allowed", False))
                 except PlayerokError as e:
                     log.warning("%s перевыставление (по списку) лота %s: %s", tag(tg), item.id, e)
                     continue
@@ -694,7 +695,11 @@ async def relist_after_sale(
     tg = seller.tg_id
     state.relisted = True
     try:
-        await client.publish_item(deal.item_id)
+        await client.publish_item(
+            deal.item_id,
+            price=deal.price if isinstance(deal.price, (int, float)) else None,
+            allow_paid=await ft.get_flag(session, tg, "relist_paid_allowed", False),
+        )
     except PlayerokError as e:
         log.warning("%s перевыставление: Playerok отказал для лота %s (сделка %s): %s",
                     tag(tg), deal.item_id, deal.id, e)
