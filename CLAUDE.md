@@ -74,9 +74,10 @@ volume.
   Теперь (как в библиотеке PlayerokAPI): цена лота (`item`) → `itemPriorityStatuses` →
   тариф `DEFAULT` → `publishItem {itemId, priorityStatuses:[id], transactionProviderId:"LOCAL"}`.
   Если DEFAULT платный и «Платное восстановление» выключено — отказ с текстом.
-  publishItem с тарифом вживую дал «Something gone wrong», поэтому сначала идёт REST
-  `POST /rest-api/public/item/{id}/republish` (кнопка «Выставить снова», из PlayerokAPI),
-  а publishItem — запасной путь; в ошибке видны оба ответа.
+  Вживую: publishItem → «Something gone wrong», REST `/rest-api/public/item/{id}/republish`
+  → 404 «Failed to find record» (republish — для снятых с продажи, не проданных). Сейчас:
+  publishItem (+`transactionProviderData:{paymentMethodId:null}`, как Playerok Universal),
+  затем REST; в ошибке оба ответа + статус лота, цена, тариф.
   Экран «Автовыставление» показывает продажи за 48 ч и судьбу лота (✅/❌/⏳/⏸ с
   причиной) по `DealState.item_id/item_url/relist_note`, без запроса к Playerok.
 - Поднятие лота (`increaseItemPriorityStatus`), перевыставление (`publishItem`),

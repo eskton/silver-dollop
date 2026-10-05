@@ -228,6 +228,10 @@ HEADERS = {
 }
 
 
+class PaidPlacementRefused(PlayerokError):
+    """Бесплатного тарифа нет, а платное восстановление выключено продавцом."""
+
+
 class PlayerokClient:
     def __init__(
         self, token: str | None = None, timeout: float = 20.0, transport: Transport | None = None
@@ -518,35 +522,39 @@ class PlayerokClient:
         (REST /item/{id}/republish, как в библиотеке PlayerokAPI)."""
         await self._rest_post(f"/rest-api/public/item/{item_id}/republish")
 
-    async def item_price(self, item_id: str) -> float | None:
+    async def item_info(self, item_id: str) -> dict[str, Any]:
         data = await self._gql("item", q.ITEM_PRICE, {"id": item_id})
-        price = _get(data, "item", "price")
-        return float(price) if isinstance(price, (int, float)) else None
+        return _get(data, "item") or {}
 
     async def publish_item(
         self, item_id: str, *, price: float | None = None, allow_paid: bool = False
     ) -> None:
-        """Выставляет лот заново: сначала как кнопка «Выставить снова» на сайте,
-        при отказе — через GraphQL publishItem с бесплатным тарифом."""
-        try:
-            await self.republish_item(item_id)
-            return
-        except PlayerokError as e:
-            log.warning("republish %s не прошёл: %s — пробую publishItem", item_id, e)
-            rest_error = str(e)
+        """Выставляет проданный лот заново через GraphQL publishItem (как Playerok
+        Universal); если не вышло — REST «republish» (он для снятых с продажи)."""
         try:
             await self._publish_graphql(item_id, price=price, allow_paid=allow_paid)
+            return
+        except PaidPlacementRefused:
+            raise  # своё решение «не платить» — обходными путями не выставляем
         except PlayerokError as e:
-            raise PlayerokError(f"{e} (republish: {rest_error})") from e
+            gql_error = str(e)
+        try:
+            await self.republish_item(item_id)
+        except PlayerokError as e:
+            raise PlayerokError(f"{gql_error} | republish: {e}") from e
 
     async def _publish_graphql(
         self, item_id: str, *, price: float | None = None, allow_paid: bool = False
     ) -> None:
-        """Публикация через GraphQL. Playerok требует тариф (priorityStatuses) и способ
-        оплаты (transactionProviderId) даже для бесплатного размещения: берём тариф
-        DEFAULT, оплата LOCAL (с баланса) — при бесплатном тарифе списаний нет."""
+        """Playerok требует тариф (priorityStatuses) и способ оплаты (transactionProviderId)
+        даже для бесплатного размещения: берём тариф DEFAULT, оплата LOCAL (с баланса) —
+        при бесплатном тарифе списаний нет."""
+        status = "?"
         try:
-            price = await self.item_price(item_id) or price
+            info = await self.item_info(item_id)
+            status = str(info.get("status") or "?")
+            if isinstance(info.get("price"), (int, float)) and info["price"] > 0:
+                price = float(info["price"])
         except PlayerokError:
             if price is None:
                 raise
@@ -561,18 +569,25 @@ class PlayerokClient:
             raise PlayerokError("Playerok не предложил обычный (бесплатный) тариф размещения")
         cost = free.get("price") or 0
         if cost and not allow_paid:
-            raise PlayerokError(
+            raise PaidPlacementRefused(
                 f"размещение платное ({cost:g} ₽), а платное восстановление выключено в настройках"
             )
-        await self._gql(
-            "publishItem",
-            q.PUBLISH_ITEM,
-            {"input": {
-                "itemId": item_id,
-                "priorityStatuses": [free["id"]],
-                "transactionProviderId": "LOCAL",
-            }},
-        )
+        try:
+            await self._gql(
+                "publishItem",
+                q.PUBLISH_ITEM,
+                {"input": {
+                    "itemId": item_id,
+                    "priorityStatuses": [free["id"]],
+                    "transactionProviderId": "LOCAL",
+                    "transactionProviderData": {"paymentMethodId": None},
+                }},
+            )
+        except PlayerokError as e:
+            # Для диагностики: статус лота и выбранный тариф (без личных данных).
+            raise PlayerokError(
+                f"{e} [лот: {status}, цена {price:g}, тариф {free.get('name') or 'DEFAULT'} {cost:g} ₽]"
+            ) from e
 
     # ----- чаты -----
 

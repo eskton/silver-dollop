@@ -21,6 +21,8 @@ async def pk(body, token):
             {"id": "vip", "type": "VIP", "price": 300},
             {"id": "def", "type": "DEFAULT", "price": M["cost"]}]}}), None)
     if op == "publishItem":
+        if M.get("pub_fail"):
+            return RawResponse(200, json.dumps({"errors": [{"message": "Something gone wrong"}]}), None)
         M["published"].append(v["input"])
         return RawResponse(200, json.dumps({"data": {"publishItem": {"id": v["input"]["itemId"]}}}), None)
     raise AssertionError(op)
@@ -30,7 +32,8 @@ async def main():
     async with PlayerokClient("T") as c:
         await c.publish_item("i1", price=5)
         assert M["price"] == 120  # цена лота с Playerok важнее цены из сделки
-        assert M["published"][-1] == {"itemId": "i1", "priorityStatuses": ["def"], "transactionProviderId": "LOCAL"}
+        assert M["published"][-1] == {"itemId": "i1", "priorityStatuses": ["def"], "transactionProviderId": "LOCAL",
+                                       "transactionProviderData": {"paymentMethodId": None}}
         print("1. бесплатный тариф DEFAULT, оплата LOCAL")
         M["item_fails"] = True
         await c.publish_item("i2", price=5)
@@ -46,12 +49,18 @@ async def main():
         await c.publish_item("i3", price=5, allow_paid=True)
         assert len(M["published"]) == 3
         print("3. платное размещение только при разрешении")
-        assert M["rest"][0] == "/rest-api/public/item/i1/republish", M["rest"]
+        assert M["rest"] == [], M["rest"]  # при успехе publishItem REST не нужен
+        M["pub_fail"] = True; M["cost"] = 0; M["item_fails"] = False
+        try:
+            await c.publish_item("i4", price=5)
+            raise AssertionError("должно было отказать")
+        except PlayerokError as e:
+            msg = str(e)
+        assert "Something gone wrong" in msg and "republish: HTTP 500" in msg and "цена 120" in msg, msg
         M["rest_ok"] = True
-        n = len(M["published"])
-        await c.publish_item("i4", price=5)
-        assert len(M["published"]) == n and M["rest"][-1].endswith("/i4/republish")
-        print("4. сначала «Выставить снова» (REST), publishItem — запасной путь")
+        await c.publish_item("i5", price=5)
+        assert M["rest"][-1] == "/rest-api/public/item/i5/republish", M["rest"]
+        print("4. publishItem отказал → REST republish; в ошибке оба ответа и тариф")
 
     print("OK")
 asyncio.run(main())

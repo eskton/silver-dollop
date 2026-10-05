@@ -124,6 +124,7 @@ query item($id: UUID) {
   item(id: $id) {
     id
     price
+    status
   }
 }
 """
