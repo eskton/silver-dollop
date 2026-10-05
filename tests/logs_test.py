@@ -77,7 +77,7 @@ async def main():
     await sync_seller(Bot(), sessions, cipher, sellers[1], notify=True)
     text = L.read_tail()
     assert "[tg=1] перевыставление: лот item-2 выставлен заново (сделка d2)" in text, text
-    assert "[tg=2] перевыставление: Playerok отказал для лота item-3 (сделка d3): Item is not sold" in text, text
+    assert "[tg=2] перевыставление: Playerok отказал для лота item-3 (сделка d3): publishItem: Item is not sold" in text, text
 
     # 3) /logs: владелец получает всё, продавец 2 — только свои строки
     owner = Msg(7534591041); await send_logs(owner)

@@ -120,8 +120,8 @@ mutation publishItem($input: PublishItemInput!) {
 """
 
 ITEM_PRICE = """
-query item($id: UUID) {
-  item(id: $id) {
+query item($id: UUID, $slug: String) {
+  item(id: $id, slug: $slug) {
     id
     price
     status

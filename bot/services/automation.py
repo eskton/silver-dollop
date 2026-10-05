@@ -699,6 +699,7 @@ async def relist_after_sale(
             deal.item_id,
             price=deal.price if isinstance(deal.price, (int, float)) else None,
             allow_paid=await ft.get_flag(session, tg, "relist_paid_allowed", False),
+            slug=deal.item_slug or None,
         )
     except PlayerokError as e:
         log.warning("%s перевыставление: Playerok отказал для лота %s (сделка %s): %s",

@@ -104,7 +104,7 @@ async def main():
     text, kb = await render_relist(sessions, seller_row, ft.FEATURE_BY_KEY["relist"])
     assert "50 робуксов</a> — ✅ выставлен заново" in text, text
     assert "Ключ Steam</a> — ⏸ не будет: лот не подходит под правила отбора" in text, text
-    assert "❌ ошибка: Item cannot be published" in text, text
+    assert "Item cannot be published" in text and "❌ ошибка: publishItem:" in text, text
     assert "100 робуксов VIP</a> — ⏳ будет выставлен" in text, text
     assert "Старый</a> — ⏸ не будет: сделка была в базе до" in text, text
     btns = [b.callback_data for r in kb.inline_keyboard for b in r]

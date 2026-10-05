@@ -522,17 +522,23 @@ class PlayerokClient:
         (REST /item/{id}/republish, как в библиотеке PlayerokAPI)."""
         await self._rest_post(f"/rest-api/public/item/{item_id}/republish")
 
-    async def item_info(self, item_id: str) -> dict[str, Any]:
-        data = await self._gql("item", q.ITEM_PRICE, {"id": item_id})
+    async def item_info(self, item_id: str | None = None, slug: str | None = None) -> dict[str, Any]:
+        variables = {"id": item_id} if item_id else {"slug": slug}
+        data = await self._gql("item", q.ITEM_PRICE, variables)
         return _get(data, "item") or {}
 
     async def publish_item(
-        self, item_id: str, *, price: float | None = None, allow_paid: bool = False
+        self,
+        item_id: str,
+        *,
+        price: float | None = None,
+        allow_paid: bool = False,
+        slug: str | None = None,
     ) -> None:
         """Выставляет проданный лот заново через GraphQL publishItem (как Playerok
         Universal); если не вышло — REST «republish» (он для снятых с продажи)."""
         try:
-            await self._publish_graphql(item_id, price=price, allow_paid=allow_paid)
+            item_id = await self._publish_graphql(item_id, price=price, allow_paid=allow_paid, slug=slug)
             return
         except PaidPlacementRefused:
             raise  # своё решение «не платить» — обходными путями не выставляем
@@ -544,25 +550,47 @@ class PlayerokClient:
             raise PlayerokError(f"{gql_error} | republish: {e}") from e
 
     async def _publish_graphql(
-        self, item_id: str, *, price: float | None = None, allow_paid: bool = False
-    ) -> None:
+        self,
+        item_id: str,
+        *,
+        price: float | None = None,
+        allow_paid: bool = False,
+        slug: str | None = None,
+    ) -> str:
         """Playerok требует тариф (priorityStatuses) и способ оплаты (transactionProviderId)
         даже для бесплатного размещения: берём тариф DEFAULT, оплата LOCAL (с баланса) —
-        при бесплатном тарифе списаний нет."""
+        при бесплатном тарифе списаний нет. Каждая ошибка подписана шагом — для диагностики.
+        Возвращает ID лота, с которым работали (по slug он может отличаться от ID из сделки)."""
         status = "?"
-        try:
-            info = await self.item_info(item_id)
-            status = str(info.get("status") or "?")
-            if isinstance(info.get("price"), (int, float)) and info["price"] > 0:
-                price = float(info["price"])
-        except PlayerokError:
-            if price is None:
-                raise
+        info: dict[str, Any] = {}
+        lookup_errors = []
+        for by_id, by_slug in ((item_id, None), (None, slug)):
+            if not (by_id or by_slug):
+                continue
+            try:
+                info = await self.item_info(by_id, by_slug)
+            except PlayerokError as e:
+                lookup_errors.append(f"лот по {'id' if by_id else 'ссылке'}: {e}")
+                continue
+            if info:
+                break
+        if info.get("id") and info["id"] != item_id:
+            log.info("publish: ID из сделки %s, ID лота по ссылке %s", item_id, info["id"])
+            item_id = str(info["id"])
+        status = str(info.get("status") or "?")
+        if isinstance(info.get("price"), (int, float)) and info["price"] > 0:
+            price = float(info["price"])
         if price is None:
-            raise PlayerokError("Playerok не отдал цену лота — без неё не выбрать тариф размещения")
-        data = await self._gql(
-            "itemPriorityStatuses", q.ITEM_PRIORITY_STATUSES, {"itemId": item_id, "price": price}
-        )
+            raise PlayerokError(
+                "не узнать цену лота" + (f" ({'; '.join(lookup_errors)})" if lookup_errors else "")
+            )
+        try:
+            data = await self._gql(
+                "itemPriorityStatuses", q.ITEM_PRIORITY_STATUSES, {"itemId": item_id, "price": price}
+            )
+        except PlayerokError as e:
+            extra = f"; {'; '.join(lookup_errors)}" if lookup_errors else ""
+            raise PlayerokError(f"тарифы: {e} [лот: {status}, цена {price:g}{extra}]") from e
         statuses = [s for s in (_get(data, "itemPriorityStatuses") or []) if isinstance(s, dict)]
         free = next((s for s in statuses if str(s.get("type")).upper() == "DEFAULT"), None)
         if free is None:
@@ -586,8 +614,9 @@ class PlayerokClient:
         except PlayerokError as e:
             # Для диагностики: статус лота и выбранный тариф (без личных данных).
             raise PlayerokError(
-                f"{e} [лот: {status}, цена {price:g}, тариф {free.get('name') or 'DEFAULT'} {cost:g} ₽]"
+                f"publishItem: {e} [лот: {status}, цена {price:g}, тариф {free.get('name') or 'DEFAULT'} {cost:g} ₽]"
             ) from e
+        return item_id
 
     # ----- чаты -----
 

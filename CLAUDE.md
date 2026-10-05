@@ -78,6 +78,9 @@ volume.
   → 404 «Failed to find record» (republish — для снятых с продажи, не проданных). Сейчас:
   publishItem (+`transactionProviderData:{paymentMethodId:null}`, как Playerok Universal),
   затем REST; в ошибке оба ответа + статус лота, цена, тариф.
+  Затем вживую ошибка без «[лот: …]» → падал запрос `item`/тарифов, не publishItem. Теперь
+  лот ищется по id из сделки, затем по slug из ссылки (ID лота может отличаться от ID
+  в сделке); ошибки подписаны шагом: «лот по id/ссылке», «тарифы:», «publishItem:».
   Экран «Автовыставление» показывает продажи за 48 ч и судьбу лота (✅/❌/⏳/⏸ с
   причиной) по `DealState.item_id/item_url/relist_note`, без запроса к Playerok.
 - Поднятие лота (`increaseItemPriorityStatus`), перевыставление (`publishItem`),

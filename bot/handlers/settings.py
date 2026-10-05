@@ -744,11 +744,14 @@ async def _restore(client: PlayerokClient, sessions: SessionFactory, tg: int, it
     if known is not None and name == "Лот":
         name = known.item_name or name
     try:
+        url = (known.item_url or "") if known is not None else ""
+        slug = url.split("/products/", 1)[1] if "/products/" in url else None
         await client.publish_item(
-            item_id, price=known.price if known is not None else None, allow_paid=allow_paid
+            item_id, price=known.price if known is not None else None, allow_paid=allow_paid,
+            slug=slug if slug and slug != item_id else None,
         )
     except (AuthRequired, PlayerokError) as e:
-        return f"❌ {html.escape(name)}: {html.escape(str(e))[:150]}"
+        return f"❌ {html.escape(name)}: {html.escape(str(e))[:600]}"
     async with sessions() as session:
         session.add(ActionLog(seller_tg_id=tg, kind="relist", target=item_id))
         # продажи с этим лотом считаем обработанными — автоматом второй раз не выставлять

@@ -12,6 +12,10 @@ async def pk(body, token):
             return RawResponse(200, "", None)
         return RawResponse(500, json.dumps({"message": "Something gone wrong"}), None)
     if op == "item":
+        if v.get("slug") == "real-lot":
+            return RawResponse(200, json.dumps({"data": {"item": {"id": "listing-1", "price": 77, "status": "SOLD"}}}), None)
+        if v.get("id") == "deal-copy":
+            return RawResponse(200, json.dumps({"errors": [{"message": "Something gone wrong"}]}), None)
         if M["item_fails"]:
             return RawResponse(200, json.dumps({"errors": [{"message": "Access denied"}]}), None)
         return RawResponse(200, json.dumps({"data": {"item": {"id": v["id"], "price": 120}}}), None)
@@ -62,5 +66,9 @@ async def main():
         assert M["rest"][-1] == "/rest-api/public/item/i5/republish", M["rest"]
         print("4. publishItem отказал → REST republish; в ошибке оба ответа и тариф")
 
+        M["pub_fail"] = False; M["rest_ok"] = False
+        await c.publish_item("deal-copy", price=5, slug="real-lot")
+        assert M["published"][-1]["itemId"] == "listing-1" and M["price"] == 77, M["published"][-1]
+        print("5. ID из сделки не найден → лот найден по ссылке и выставлен")
     print("OK")
 asyncio.run(main())
