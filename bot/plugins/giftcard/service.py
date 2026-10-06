@@ -73,8 +73,26 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
-def make_client() -> FazerCardsClient:
-    return FazerCardsClient(api_key_from_env(), transport=TRANSPORT)
+KEY_SETTING = "giftcard_api_key_enc"
+
+
+def make_client(api_key: str) -> FazerCardsClient:
+    return FazerCardsClient(api_key, transport=TRANSPORT)
+
+
+async def get_api_key(session: AsyncSession, tg: int) -> str:
+    """Ключ, введённый в боте (хранится зашифрованным), иначе FAZER_API_KEY из окружения."""
+    enc = await ft.get_setting(session, tg, KEY_SETTING, "")
+    if enc:
+        try:
+            return _cipher().decrypt(enc)
+        except Exception:
+            log.warning("%s GIFTCARD API_ERROR: сохранённый ключ не расшифровывается", tag(tg))
+    return api_key_from_env()
+
+
+async def set_api_key(session: AsyncSession, tg: int, key: str) -> None:
+    await ft.set_setting(session, tg, KEY_SETTING, _cipher().encrypt(key) if key else "")
 
 
 def _cipher() -> TokenCipher:
@@ -182,12 +200,12 @@ async def on_deal(
         if not await _fresh_enough(session, tg, first_seen):
             log.info("%s GIFTCARD сделка %s появилась до включения плагина — пропуск", tag(tg), deal.id)
             return None
-        if not api_key_from_env():
+        if not await get_api_key(session, tg):
             log.warning("%s GIFTCARD API_ERROR: не задан FAZER_API_KEY, сделка %s не обработана", tag(tg), deal.id)
             await notify(
                 bot, session, tg, "problem",
-                "🎁 Gift Card: пришёл заказ на привязанный лот, но не задан ключ FAZER_API_KEY "
-                "в Railway. Выдай вручную и добавь ключ.",
+                "🎁 Gift Card: пришёл заказ на привязанный лот, но не задан API-ключ FazerCards. "
+                "Выдай вручную и введи ключ: /giftcard → «🔑 Ввести API-ключ».",
             )
             return None
         order = GiftcardOrder(
@@ -267,7 +285,7 @@ async def advance(
         log.info("%s GIFTCARD PROCESSING сделка %s, попытка %s", tag(tg), order.deal_id, order.attempts)
         log.info("%s GIFTCARD API_REQUEST покупка %s/%s ×%s", tag(tg), order.category_id, order.card_id, order.quantity)
         try:
-            async with make_client() as api:
+            async with make_client(await get_api_key(session, tg)) as api:
                 result = await api.order_giftcard(order.category_id, order.card_id, order.quantity, order.idem_key)
         except FazerUnknownResult as e:
             order.status = "UNKNOWN"
@@ -287,7 +305,7 @@ async def advance(
             order.status = "UNKNOWN"
             return
         try:
-            async with make_client() as api:
+            async with make_client(await get_api_key(session, tg)) as api:
                 result = await api.get_order(order.provider_order_id)
         except FazerError as e:
             log.info("%s GIFTCARD API_ERROR проверка заказа %s: %s", tag(tg), order.provider_order_id, e)

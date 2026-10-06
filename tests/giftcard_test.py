@@ -53,7 +53,7 @@ PlayerokClient._curl_post = lambda self, body, token: pk(body, token)
 F = {"mode": "ok", "purchases": {}, "charges": 0, "headers": [], "pending_polls": 0}
 async def fazer(method, url, headers, params, body):
     F["headers"].append(dict(headers))
-    assert headers.get("X-API-Key") == "fc_SECRET_TEST_KEY"
+    assert headers.get("X-API-Key") in ("fc_SECRET_TEST_KEY", "fc_FROM_BOT_KEY_123")
     path = url.split("api.fzr.cards", 1)[1]
     if path == "/api/v2/balance":
         return 200, json.dumps({"ok": True, "balance": "12.3400", "currency": "USD"})
@@ -279,6 +279,27 @@ async def main():
     text, _ = await gh.render(sessions, tg)
     assert "fc_SECRET" not in text and "✅ задан" in text and "Выдано:</b> 5" in text, text
     print("11. /giftcard — только админу, ключ на экране не показывается")
+
+    # 12. ключ, введённый через бота: шифруется в базе и используется вместо переменной
+    from bot.db import SellerSetting
+    async with sessions() as s:
+        await gc.set_api_key(s, tg, "fc_FROM_BOT_KEY_123")
+        raw = await s.scalar(select(SellerSetting.value).where(SellerSetting.key == gc.KEY_SETTING))
+        assert raw and "fc_FROM_BOT_KEY_123" not in raw
+        assert await gc.get_api_key(s, tg) == "fc_FROM_BOT_KEY_123"
+        async with gc.make_client(await gc.get_api_key(s, tg)) as api:
+            await api.balance()
+    assert F["headers"][-1]["X-API-Key"] == "fc_FROM_BOT_KEY_123"
+    os.environ.pop("FAZER_API_KEY")
+    DEALS.clear(); DEALS["k1"] = ["PAID", "Steam Gift Card 5$"]
+    await poll(); await poll()
+    async with sessions() as s:
+        o = await s.scalar(select(GiftcardOrder).where(GiftcardOrder.deal_id == "k1"))
+        assert o.status == "DELIVERED", (o.status, o.error)
+        await gc.set_api_key(s, tg, "")
+        assert await gc.get_api_key(s, tg) == ""
+    assert "fc_FROM_BOT_KEY_123" not in LOG.getvalue()
+    print("12. ключ из бота: зашифрован в базе, работает без переменной Railway, удаляется")
     print("OK")
 
 asyncio.run(main())

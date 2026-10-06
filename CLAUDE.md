@@ -39,7 +39,8 @@ Telegram-бот — помощник продавцов на playerok.com (ан�
 - `db.py` — модели; `_add_missing_columns` досоздаёт новые колонки в старой базе.
 - `plugins/giftcard/` — Gift Card через FazerCards (api.fzr.cards, OpenAPI:
   `/public/docs/openapi.json`). Закрытый: только для `is_admin` (покупки с баланса владельца),
-  команда `/giftcard`. Ключ — переменная `FAZER_API_KEY`. `client.py` — только HTTP
+  команда `/giftcard`. Ключ вводится в боте («🔑 Ввести API-ключ», шифруется SECRET_KEY,
+  настройка `giftcard_api_key_enc`), запасной вариант — переменная `FAZER_API_KEY`. `client.py` — только HTTP
   (balance, giftcards, giftcards/cards, giftcards/order с `Idempotency-Key`, orders/{id});
   `service.py` — состояния `GiftcardOrder` (PROCESSING→AWAITING→BOUGHT→DELIVERED; UNKNOWN,
   FAILED, NEEDS_CHECK). Строка заказа пишется до покупки; повтор при неизвестном итоге —
