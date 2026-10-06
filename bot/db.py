@@ -201,6 +201,49 @@ class StarsOrder(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class GiftcardMap(Base):
+    """Плагин Gift Card: лот Playerok → товар FazerCards (категория + номинал)."""
+
+    __tablename__ = "giftcard_maps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    # ID лота, slug из ссылки или название лота
+    lot_key: Mapped[str] = mapped_column(String(255))
+    category_id: Mapped[str] = mapped_column(String(128))
+    card_id: Mapped[str] = mapped_column(String(128))
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GiftcardOrder(Base):
+    """Покупка Gift Card под заказ Playerok. Одна строка на сделку — защита от
+    двойной покупки. PROCESSING → (AWAITING) → BOUGHT → DELIVERED; FAILED, UNKNOWN,
+    NEEDS_CHECK — см. plugins/giftcard/service.py."""
+
+    __tablename__ = "giftcard_orders"
+    __table_args__ = (UniqueConstraint("seller_tg_id", "deal_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    deal_id: Mapped[str] = mapped_column(String(128))
+    chat_id: Mapped[str | None] = mapped_column(String(128))
+    item_name: Mapped[str] = mapped_column(String(255), default="")
+    buyer: Mapped[str | None] = mapped_column(String(64))
+    category_id: Mapped[str] = mapped_column(String(128))
+    card_id: Mapped[str] = mapped_column(String(128))
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    idem_key: Mapped[str] = mapped_column(String(255))
+    provider_order_id: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="PROCESSING")
+    codes_enc: Mapped[str | None] = mapped_column(Text)  # коды, зашифрованные SECRET_KEY
+    error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    buyer_told: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    admin_told: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class PluginAccess(Base):
     """Кому выдан платный плагин и до какого срока (NULL — бессрочно)."""
 

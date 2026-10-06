@@ -30,6 +30,7 @@ from ..playerok import AuthRequired, ChatPreview, Deal, Item, PlayerokClient, Pl
 from ..crypto import TokenCipher
 from ..logs import tag
 from . import features as ft
+from ..plugins.giftcard import service as giftcard_svc
 from ..plugins.stars import service as stars_svc
 from .notifications import notify
 
@@ -154,10 +155,16 @@ async def _process_deal(
             state.status = cur
             return
 
+    # --- плагин Gift Card (FazerCards): лот привязан к карте поставщика ---
+    gift = await giftcard_svc.on_deal(bot, session, seller, client, deal, first_seen=state.first_seen_at)
+    if gift == "delivered":
+        state.delivered = True  # дальше — обычное автоподтверждение
+
     # --- автовыдача: пробуем, пока заказ оплачен и товар не выдан (например,
     # запас добавили позже или отправка в чат не прошла с первого раза) ---
     if (
         cur == "PAID"
+        and gift is None
         and not state.delivered
         # не трогаем старые заказы: их продавец мог уже закрыть вручную
         and now - (state.created_at or state.first_seen_at or now) <= timedelta(hours=24)

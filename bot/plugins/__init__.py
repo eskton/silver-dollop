@@ -15,6 +15,9 @@ PAID_PLUGINS: dict[str, str] = {
 
 
 def plugin_routers() -> list[Router]:
+    # Gift Card (FazerCards) — закрытый: только для администраторов, через /giftcard;
+    # не выдаётся через /grant, т.к. покупки идут с баланса владельца.
+    from .giftcard.handlers import router as giftcard_router
     from .stars.handlers import router as stars_router
 
-    return [stars_router]
+    return [stars_router, giftcard_router]

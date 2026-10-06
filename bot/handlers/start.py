@@ -25,7 +25,10 @@ HELP_TEXT = (
     "/logs — файл с логами, если что-то не работает\n"
     "/cancel — отменить текущее действие"
 )
-ADMIN_HINT = "\n\nТы админ: /admin — выдача доступа к платным плагинам."
+ADMIN_HINT = (
+    "\n\nТы админ: /admin — выдача доступа к платным плагинам, "
+    "/giftcard — автовыдача Gift Card через FazerCards."
+)
 
 
 @router.message(CommandStart())
