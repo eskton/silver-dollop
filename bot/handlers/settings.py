@@ -107,7 +107,10 @@ async def _show(cb: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
         await cb.message.edit_text(text, reply_markup=kb)
     except TelegramBadRequest:
         await cb.message.answer(text, reply_markup=kb)
-    await cb.answer()
+    try:
+        await cb.answer()
+    except TelegramBadRequest:
+        pass  # уже ответили (например, всплывающим текстом)
 
 
 # ===================== экран функции =====================
@@ -413,7 +416,8 @@ async def render_lot_detail(
         lines.append("<i>пусто — добавь новые</i>")
     rows = [
         [_btn("➕ Добавить к этому лоту", f"ad:addto:{h}")],
-        [_btn("🗑 Очистить весь запас", f"ad:clear:{h}")],
+        [_btn("🗑 Очистить свободный запас", f"ad:clear:{h}")],
+        [_btn("❌ Удалить лот из автовыдачи", f"ad:dellot:{h}")],
     ]
     rows += [[_btn(f"❌ Удалить №{i}", f"ad:rm:{item.id}")] for i, item in enumerate(free[:15], 1)]
     rows.append([_btn("‹ К автовыдаче", "f:autodelivery")])
@@ -530,6 +534,42 @@ async def stock_clear(cb: CallbackQuery, sessions: SessionFactory) -> None:
         await session.commit()
     await _refresh(cb, sessions, ft.FEATURE_BY_KEY["autodelivery"])
     await cb.answer("Запас очищен")
+
+
+@router.callback_query(F.data.startswith("ad:dellot:"))
+async def lot_delete_ask(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    h = cb.data.split(":")[2]
+    async with sessions() as session:
+        found = await _lot_name_by_hash(session, cb.from_user.id, h)
+    if found is None:
+        await cb.answer("Лот уже удалён", show_alert=True)
+        return
+    text = (
+        f"Удалить лот «{html.escape(found[0])}» из автовыдачи целиком?\n\n"
+        "Удалятся все его товары — и свободные, и история выданных. "
+        "Новые заказы на этот лот бот выдавать не будет."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("✅ Да, удалить", f"ad:dellotok:{h}")],
+        [_btn("‹ Отмена", f"ad:lot:{h}")],
+    ])
+    await _show(cb, text, kb)
+
+
+@router.callback_query(F.data.startswith("ad:dellotok:"))
+async def lot_delete(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    h = cb.data.split(":")[2]
+    async with sessions() as session:
+        found = await _lot_name_by_hash(session, cb.from_user.id, h)
+        if found is not None:
+            await session.execute(
+                delete(DeliveryItem).where(
+                    DeliveryItem.seller_tg_id == cb.from_user.id, DeliveryItem.item_key == found[1]
+                )
+            )
+            await session.commit()
+    await cb.answer("Лот удалён из автовыдачи" if found else "Лот уже удалён")
+    await _refresh(cb, sessions, ft.FEATURE_BY_KEY["autodelivery"])
 
 
 # ===================== автоответчик =====================

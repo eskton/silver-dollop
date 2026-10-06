@@ -35,6 +35,24 @@ async def main():
         it = await s.get(DeliveryItem, item_id); await s.delete(it); await s.commit()
     dt2, _ = await render_lot_detail(sessions, 1, h)
     assert "Свободно:</b> 1" in dt2
+    # удаление лота целиком (с подтверждением): уходят и свободные, и выданные
+    from bot.handlers.settings import lot_delete_ask, lot_delete
+    assert f"ad:dellot:{h}" in btns
+    shown = []
+    class Msg:
+        async def edit_text(self, text, reply_markup=None): shown.append((text, reply_markup))
+        async def answer(self, text, reply_markup=None): shown.append((text, reply_markup))
+    class Cb:
+        def __init__(self, data): self.data = data; self.from_user = SimpleNamespace(id=1, username="e", first_name="e"); self.message = Msg()
+        async def answer(self, *a, **k): pass
+    await lot_delete_ask(Cb(f"ad:dellot:{h}"), sessions)
+    assert "Удалить лот" in shown[-1][0]
+    assert f"ad:dellotok:{h}" in [b.callback_data for r in shown[-1][1].inline_keyboard for b in r]
+    await lot_delete(Cb(f"ad:dellotok:{h}"), sessions)
+    async with sessions() as s:
+        assert await s.scalar(select(func.count(DeliveryItem.id))) == 0
+    text, kb = await render_autodelivery(sessions, seller, ft.FEATURE_BY_KEY["autodelivery"])
+    assert not any(f"ad:lot:{h}" == b.callback_data for r in kb.inline_keyboard for b in r)
     assert _mask("x"*50).endswith("xxxxxx") and len(_mask("x"*50)) < 50
     print("OK")
 asyncio.run(main())
