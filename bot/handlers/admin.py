@@ -21,7 +21,8 @@ HELP = (
     "/grant &lt;id или @username&gt; &lt;плагин&gt; [дней] — выдать доступ (без дней — навсегда)\n"
     "/revoke &lt;id или @username&gt; &lt;плагин&gt; — отозвать\n"
     "/access [плагин] — кому выдан доступ\n"
-    "/sellers — продавцы бота\n\n"
+    "/sellers — продавцы бота\n"
+    "/giftcard — 🎁 Gift Card через FazerCards (только для админа)\n\n"
     "Плагины: " + ", ".join(f"<code>{k}</code> ({v})" for k, v in PAID_PLUGINS.items())
 )
 

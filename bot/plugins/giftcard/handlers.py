@@ -113,7 +113,7 @@ async def _show(target: Message | CallbackQuery, sessions: SessionFactory) -> No
         await target.answer(text, reply_markup=kb)
 
 
-@router.message(Command("giftcard"))
+@router.message(Command("giftcard", "giftcards"))
 async def cmd_giftcard(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
     await state.clear()
     await _show(message, sessions)
