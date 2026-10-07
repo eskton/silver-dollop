@@ -211,11 +211,24 @@ async def nominal_report(
     costs = costs or {}
     ref = lot_ref.strip()
     slug = ref.split("/products/", 1)[1].split("?")[0].strip("/") if "/products/" in ref else ref
-    item = await client.get_item(slug=slug)
+    try:
+        item = await client.get_item(slug=slug)
+    except PlayerokError as e:
+        raise PlayerokError(f"лот по ссылке: {e}") from e
     if not item.category_id:
         return "Playerok не отдал категорию этого лота."
-    lots = await client.category_items(item.category_id, pages=pages,
-                                       obtaining_type_id=item.obtaining_type_id or None, on_page=on_page)
+    try:
+        lots = await client.category_items(item.category_id, pages=pages,
+                                           obtaining_type_id=item.obtaining_type_id or None, on_page=on_page)
+    except PlayerokError as e:
+        if not item.obtaining_type_id:
+            raise PlayerokError(f"лоты категории: {e}") from e
+        # Фильтр по способу получения мог не понравиться серверу — без него, фильтруем сами.
+        log.info("выгода по рынку: без фильтра obtainingTypeId после ошибки: %s", e)
+        try:
+            lots = await client.category_items(item.category_id, pages=pages, on_page=on_page)
+        except PlayerokError as e2:
+            raise PlayerokError(f"лоты категории: {e2}") from e2
     partial = getattr(client, "partial", False)
     if item.obtaining_type_id:
         lots = [o for o in lots if not o.obtaining_type_id or o.obtaining_type_id == item.obtaining_type_id]

@@ -14,9 +14,16 @@ M = {"mode": "ok", "pages": 0}
 async def pk(body, token):
     op, v = body["operationName"], body["variables"]
     if op == "item":
+        if M["mode"] == "item502":
+            return RawResponse(502, "<html>Bad Gateway</html>", None)
         return RawResponse(200, json.dumps({"data": {"item": {"id": "m", "name": "x", "category": {"id": "cat"},
                            "obtainingType": {"id": "code", "name": "Промокод"}}}}), None)
     if op == "items":
+        if M["mode"] == "flaky" and M.pop("flaked", None) is None:
+            M["flaked"] = True
+            return RawResponse(502, "<html>Bad Gateway</html>", None)
+        if M["mode"] == "nofilter" and "obtainingTypeId" in v["filter"]:
+            return RawResponse(502, "<html>Bad Gateway</html>", None)
         M["pages"] += 1
         if M["mode"] == "crash":
             raise RuntimeError("boom")
@@ -63,6 +70,22 @@ async def main():
     await hp._nominal(Msg(), sessions, cipher, user)
     assert SENT[-1][1].startswith("⚠️"), SENT[-1]
     print("3. сбой — бот отвечает ошибкой, а не молчит")
+
+    SENT.clear(); M.update(mode="flaky", pages=0)
+    await hp._nominal(Msg(), sessions, cipher, user)
+    assert "<b>100</b> · 104 ₽" in SENT[-1][1], SENT[-1]
+    assert any("HTTP 502" in t and "повтор" in t for k, t in SENT if k == "edit"), SENT
+    print("4. разовый 502 — повтор, отчёт пришёл")
+
+    SENT.clear(); M.update(mode="nofilter", pages=0)
+    await hp._nominal(Msg(), sessions, cipher, user)
+    assert "<b>100</b> · 104 ₽" in SENT[-1][1], SENT[-1]
+    print("5. 502 с фильтром способа получения — собрал без фильтра")
+
+    SENT.clear(); M.update(mode="item502", pages=0)
+    await hp._nominal(Msg(), sessions, cipher, user)
+    assert "лот по ссылке" in SENT[-1][1] and "временно не отвечает" in SENT[-1][1], SENT[-1]
+    print("6. постоянный 502 — понятная ошибка с шагом:", SENT[-1][1][:90])
 
     # кнопка в калькуляторе прибыли
     _, kb = await hs._profit_screen(sessions, 1)

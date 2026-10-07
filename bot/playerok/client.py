@@ -258,6 +258,7 @@ RPM_LIMIT = int(os.getenv("PLAYEROK_RPM", "12") or 12)
 _RATE: dict[str, Any] = {}  # токен → (lock, deque времени запросов)
 TOO_MANY_RE = re.compile(r"too many requests|rate limit", re.I)
 RATE_RETRY_DELAYS = (10, 20)
+SERVER_RETRY_DELAYS = (3, 8)  # повтор чтения при HTTP 500/502/504
 
 
 async def _rate_wait(token: str | None, on_wait: Any = None) -> None:
@@ -439,10 +440,27 @@ class PlayerokClient:
             # HTML вместо JSON — это страница защиты от ботов, а не истёкшая сессия.
             snippet = " ".join(resp.text.split())[:300]
             log.warning("Playerok %s: HTTP %s, не JSON: %s", operation, resp.status, snippet)
+            # 502/504 и т.п. — временный сбой сервера Playerok. Чтение (сохранённые запросы)
+            # безопасно повторить; изменения (мутации) не повторяем — итог неизвестен.
+            attempt5 = getattr(self, "_5xx_attempt", 0)
+            if persisted and resp.status in (500, 502, 504) and attempt5 < len(SERVER_RETRY_DELAYS):
+                import asyncio
+
+                delay = SERVER_RETRY_DELAYS[attempt5] if self._real_transport() else 0
+                if self.on_wait is not None:
+                    await self.on_wait(f"Playerok временно не отвечает (HTTP {resp.status}) — повтор через {delay} с")
+                self._5xx_attempt = attempt5 + 1
+                try:
+                    await asyncio.sleep(delay)
+                    return await self._gql(operation, query, variables, _retries=_retries)
+                finally:
+                    self._5xx_attempt = attempt5
             if resp.status in (403, 429, 503):
                 raise PlayerokError(
                     f"защита Playerok заблокировала запрос (HTTP {resp.status})"
                 )
+            if resp.status in (500, 502, 504):
+                raise PlayerokError(f"сервер Playerok временно не отвечает (HTTP {resp.status}), попробуй позже")
             raise PlayerokError(f"Playerok вернул не JSON (HTTP {resp.status})")
         if resp.status == 401:
             raise AuthRequired("HTTP 401")
