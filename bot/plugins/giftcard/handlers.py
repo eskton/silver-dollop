@@ -268,32 +268,132 @@ async def add_start(cb: CallbackQuery, state: FSMContext) -> None:
     )
 
 
+MAX_BUTTONS = 30
+
+
+def _pick_kb(items: list[tuple[str, str]], prefix: str) -> InlineKeyboardMarkup:
+    """Кнопки выбора: в callback только номер в списке, сам список — в FSM."""
+    rows = [[_btn(label[:60], f"{prefix}:{i}")] for i, (_, label) in enumerate(items[:MAX_BUTTONS])]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _ask_category(message: Message, state: FSMContext, cats: list[tuple[str, str]], query: str = "") -> None:
+    found = [c for c in cats if query.lower() in c[1].lower()] if query else cats
+    if not found:
+        await message.answer("Ничего не нашёл. Напиши другую часть названия, например <code>steam</code>.")
+        return
+    await state.update_data(cats_view=found[:MAX_BUTTONS])
+    more = (
+        f"\nПоказаны первые {MAX_BUTTONS} из {len(found)} — напиши часть названия для поиска "
+        "(например <code>steam</code>)."
+        if len(found) > MAX_BUTTONS else "\nМожно написать часть названия для поиска."
+    )
+    await message.answer(
+        f"Шаг 2/4. Выбери <b>карту</b> (категорию FazerCards):{more}",
+        reply_markup=_pick_kb(found, "gc:pc"),
+    )
+
+
 @router.message(AddMap.lot, F.text, ~F.text.func(is_cancel))
-async def add_lot(message: Message, state: FSMContext) -> None:
+async def add_lot(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
     raw = message.text.strip()
     key = raw.split("/products/", 1)[1].split("?")[0].strip("/") if "/products/" in raw else raw
     await state.update_data(lot=key[:255])
     await state.set_state(AddMap.category)
-    await message.answer("Шаг 2/4. ID категории FazerCards (category_id из «📋 Каталог»):")
+    try:
+        async with await _client(sessions, message.from_user.id) as api:
+            items = await api.categories()
+    except FazerError as e:
+        await message.answer(
+            f"Не смог загрузить каталог FazerCards: <code>{html.escape(str(e))[:200]}</code>\n"
+            "Проверь ключ («🔌 Проверить API») и начни заново."
+        )
+        await state.clear()
+        return
+    cats = [(str(i.get("category_id")), str(i.get("name") or i.get("category_id"))) for i in items if i.get("category_id")]
+    await state.update_data(cats=cats)
+    await _ask_category(message, state, cats)
 
 
 @router.message(AddMap.category, F.text, ~F.text.func(is_cancel))
-async def add_category(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
-    category = message.text.strip()
-    await state.update_data(category=category[:128])
-    await state.set_state(AddMap.card)
+async def add_category_search(message: Message, state: FSMContext) -> None:
+    cats = (await state.get_data()).get("cats") or []
+    await _ask_category(message, state, cats, message.text.strip())
+
+
+@router.callback_query(AddMap.category, F.data.startswith("gc:pc:"))
+async def add_category_pick(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    view = (await state.get_data()).get("cats_view") or []
+    idx = int(cb.data.split(":")[2])
+    if idx >= len(view):
+        await cb.answer("Список устарел, выбери ещё раз", show_alert=True)
+        return
+    category_id, name = view[idx]
+    await cb.answer()
     try:
-        hint = await _offers_text(category, sessions, message.from_user.id)
+        async with await _client(sessions, cb.from_user.id) as api:
+            data = await api.offers(category_id)
     except FazerError as e:
-        hint = f"(не смог загрузить номиналы: {html.escape(str(e))[:200]})"
-    await message.answer(f"{hint}\n\nШаг 3/4. Пришли <b>card_id</b> нужного номинала:")
+        await cb.message.answer(f"Не смог загрузить номиналы: <code>{html.escape(str(e))[:200]}</code>")
+        return
+    offers = [
+        (str(o.get("card_id")),
+         f"{o.get('name')} — ${o.get('price_usd')} (в наличии {o.get('stock')})")
+        for o in data.get("offers") or [] if o.get("card_id") is not None
+    ]
+    if not offers:
+        await cb.message.answer(f"В «{html.escape(name)}» сейчас нет номиналов. Выбери другую карту.")
+        return
+    await state.update_data(category=category_id, category_name=name, offers=offers[:MAX_BUTTONS])
+    await state.set_state(AddMap.card)
+    await cb.message.answer(
+        f"Шаг 3/4. <b>{html.escape(name)}</b> — выбери номинал:",
+        reply_markup=_pick_kb(offers, "gc:po"),
+    )
 
 
-@router.message(AddMap.card, F.text, ~F.text.func(is_cancel))
-async def add_card(message: Message, state: FSMContext) -> None:
-    await state.update_data(card=message.text.strip()[:128])
+@router.callback_query(AddMap.card, F.data.startswith("gc:po:"))
+async def add_card_pick(cb: CallbackQuery, state: FSMContext) -> None:
+    offers = (await state.get_data()).get("offers") or []
+    idx = int(cb.data.split(":")[2])
+    if idx >= len(offers):
+        await cb.answer("Список устарел, выбери ещё раз", show_alert=True)
+        return
+    card_id, label = offers[idx]
+    await state.update_data(card=card_id, card_label=label)
     await state.set_state(AddMap.quantity)
-    await message.answer("Шаг 4/4. Сколько кодов выдавать за один заказ? (обычно 1)")
+    await cb.answer()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[_btn(str(n), f"gc:pq:{n}") for n in (1, 2, 3, 5)]])
+    await cb.message.answer(
+        f"Шаг 4/4. Номинал: {html.escape(label)}\nСколько кодов выдавать за один заказ? "
+        "Нажми кнопку или напиши число:",
+        reply_markup=kb,
+    )
+
+
+async def _save_map(user, state: FSMContext, sessions: SessionFactory, qty: int, reply: Message) -> None:
+    data = await state.get_data()
+    await state.clear()
+    async with sessions() as session:
+        session.add(GiftcardMap(
+            seller_tg_id=user.id, lot_key=data["lot"], category_id=data["category"],
+            card_id=data["card"], quantity=qty,
+        ))
+        await session.commit()
+        seller = await get_or_create_seller(session, user)
+    await reply.answer(
+        f"✅ Привязано: «{html.escape(data['lot'][:60])}» → {html.escape(data.get('category_name', ''))}, "
+        f"{html.escape(data.get('card_label', data['card']))} ×{qty}",
+        reply_markup=main_menu(seller.is_connected),
+    )
+    text, kb = await render(sessions, user.id)
+    await reply.answer(text, reply_markup=kb)
+
+
+@router.callback_query(AddMap.quantity, F.data.startswith("gc:pq:"))
+async def add_quantity_pick(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    await cb.answer()
+    await _save_map(cb.from_user, state, sessions, int(cb.data.split(":")[2]), cb.message)
 
 
 @router.message(AddMap.quantity, F.text, ~F.text.func(is_cancel))
@@ -302,17 +402,7 @@ async def add_quantity(message: Message, state: FSMContext, sessions: SessionFac
     if not text.isdigit() or not 1 <= int(text) <= 100:
         await message.answer("Нужно число от 1 до 100.")
         return
-    data = await state.get_data()
-    await state.clear()
-    async with sessions() as session:
-        session.add(GiftcardMap(
-            seller_tg_id=message.from_user.id, lot_key=data["lot"], category_id=data["category"],
-            card_id=data["card"], quantity=int(text),
-        ))
-        await session.commit()
-        seller = await get_or_create_seller(session, message.from_user)
-    await message.answer("✅ Привязка добавлена.", reply_markup=main_menu(seller.is_connected))
-    await _show(message, sessions)
+    await _save_map(message.from_user, state, sessions, int(text), message)
 
 
 @router.callback_query(F.data.startswith("gc:del:"))
