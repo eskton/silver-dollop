@@ -42,6 +42,7 @@ async def main():
     # кнопки калькулятора не пересекаются с другими экранами
     root = pathlib.Path(__file__).resolve().parents[1] / "bot"
     others = "".join(p.read_text() for p in root.rglob("*.py") if p.name != "stats.py")
-    assert not re.search(r'"pc[:"]', others)
+    # чужие ОБРАБОТЧИКИ на «pc…» запрещены (кнопки-ссылки на экран калькулятора — можно)
+    assert not re.search(r'F\.data(?: ==|\.startswith\()\s*"pc[:"]', others)
     print("OK")
 asyncio.run(main())

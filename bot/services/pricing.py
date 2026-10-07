@@ -200,8 +200,9 @@ def parse_costs(text: str) -> dict[int, float]:
 
 
 async def nominal_report(
-    client: PlayerokClient, lot_ref: str, divisor: float, pages: int = 8,
+    client: PlayerokClient, lot_ref: str, divisor: float, pages: int = 5,
     costs: dict[int, float] | None = None, own_user_id: str | None = None,
+    on_page=None,
 ) -> str:
     """Калькулятор выгоды по рынку: для каждого номинала в категории (и способе получения)
     лота lot_ref — самый дешёвый ЧУЖОЙ лот (свои исключены), его цена для покупателя
@@ -214,7 +215,8 @@ async def nominal_report(
     if not item.category_id:
         return "Playerok не отдал категорию этого лота."
     lots = await client.category_items(item.category_id, pages=pages,
-                                       obtaining_type_id=item.obtaining_type_id or None)
+                                       obtaining_type_id=item.obtaining_type_id or None, on_page=on_page)
+    partial = getattr(client, "partial", False)
     if item.obtaining_type_id:
         lots = [o for o in lots if not o.obtaining_type_id or o.obtaining_type_id == item.obtaining_type_id]
     lots = [o for o in lots if not own_user_id or o.user_id != own_user_id]  # только чужие
@@ -228,7 +230,8 @@ async def nominal_report(
     way = f" · {html.escape(item.obtaining_type_name)}" if item.obtaining_type_name else ""
     lines = [
         f"🧮 <b>Выгода по рынку</b>{way}",
-        f"чужих лотов просмотрено: {len(lots)}, курс ÷{divisor:g}",
+        f"чужих лотов просмотрено: {len(lots)}, курс ÷{divisor:g}"
+        + (" — <b>частично</b>: Playerok ограничил запросы, нажми «🔄» позже" if partial else ""),
         "<i>самая низкая цена конкурента ÷ курс − закупка = прибыль с продажи</i>",
         "",
     ]

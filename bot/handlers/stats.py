@@ -115,6 +115,7 @@ async def _profit_screen(sessions: SessionFactory, tg: int) -> tuple[str, Inline
     btn = InlineKeyboardButton
     rows = [
         [btn(text="➕ Добавить товар", callback_data="pc:add"), btn(text="🔄 Пересчитать", callback_data="pc")],
+        [btn(text="🌐 Выгода по рынку (чужие лоты)", callback_data="dp:nom")],
     ]
     rows += [[btn(text=f"🗑 {r.keyword[:30]}", callback_data=f"pc:del:{r.id}")] for r in rules]
     rows.append([btn(text="‹ К аналитике", callback_data="stats:refresh")])

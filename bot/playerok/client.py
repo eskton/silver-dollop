@@ -257,10 +257,10 @@ HEADERS = {
 RPM_LIMIT = int(os.getenv("PLAYEROK_RPM", "12") or 12)
 _RATE: dict[str, Any] = {}  # токен → (lock, deque времени запросов)
 TOO_MANY_RE = re.compile(r"too many requests|rate limit", re.I)
-RATE_RETRY_DELAYS = (15, 30, 45)
+RATE_RETRY_DELAYS = (10, 20)
 
 
-async def _rate_wait(token: str | None) -> None:
+async def _rate_wait(token: str | None, on_wait: Any = None) -> None:
     """Ждёт, если за последнюю минуту с этого токена уже RPM_LIMIT запросов."""
     import asyncio
     import collections
@@ -280,7 +280,10 @@ async def _rate_wait(token: str | None) -> None:
             if len(stamps) < RPM_LIMIT:
                 stamps.append(now)
                 return
-            await asyncio.sleep(60 - (now - stamps[0]) + 0.05)
+            pause = 60 - (now - stamps[0]) + 0.05
+            if on_wait is not None and pause > 2:
+                await on_wait(f"лимит Playerok — жду {pause:.0f} с")
+            await asyncio.sleep(pause)
 
 
 class PaidPlacementRefused(PlayerokError):
@@ -295,6 +298,8 @@ class PlayerokClient:
         self._timeout = timeout
         self._transport = transport
         self._session: Any = None
+        # async-функция(текст) — сообщать о паузах из-за лимита (для экранов с прогрессом)
+        self.on_wait: Any = None
 
     async def _curl_post(self, body: dict[str, Any], token: str | None) -> RawResponse:
         # curl_cffi повторяет TLS-отпечаток настоящего Chrome: без этого защита
@@ -398,7 +403,7 @@ class PlayerokClient:
             body = {"operationName": operation, "query": query, "variables": variables or {}}
         send = self._transport or self._curl_post
         if self._real_transport():
-            await _rate_wait(self._token)
+            await _rate_wait(self._token, self.on_wait)
         try:
             resp = await send(body, self._token)
         except Exception as e:  # сеть, таймаут, TLS
@@ -421,6 +426,8 @@ class PlayerokClient:
 
                 delay = RATE_RETRY_DELAYS[attempt] if self._real_transport() else 0
                 log.warning("Playerok %s: слишком много запросов — жду %s с и повторяю", operation, delay)
+                if self.on_wait is not None:
+                    await self.on_wait(f"Playerok просит подождать — повтор через {delay} с")
                 self._rate_attempt = attempt + 1
                 try:
                     await asyncio.sleep(delay)
@@ -581,24 +588,36 @@ class PlayerokClient:
         return result
 
     async def category_items(
-        self, category_id: str, pages: int = 5, obtaining_type_id: str | None = None
+        self, category_id: str, pages: int = 5, obtaining_type_id: str | None = None,
+        on_page: Any = None,
     ) -> list[Item]:
         """Лоты всех продавцов в категории (как PlayerokAPI.get_items), только APPROVED.
-        obtaining_type_id — только с этим способом получения (код / по нику и т.п.)."""
+        obtaining_type_id — только с этим способом получения (код / по нику и т.п.).
+        Если Playerok начал отказывать на 2-й и дальше странице — возвращает собранное
+        (self.partial = True), а не теряет всё."""
         result: list[Item] = []
         after: str | None = None
+        self.partial = False
         filt: dict[str, Any] = {"gameCategoryId": category_id, "status": ["APPROVED"]}
         if obtaining_type_id:
             filt["obtainingTypeId"] = obtaining_type_id
-        for _ in range(pages):
-            data = await self._gql(
-                "items",
-                "persisted:" + PERSISTED_QUERIES["items"],
-                {
-                    "pagination": {"first": 24, "after": after},
-                    "filter": filt,
-                },
-            )
+        for page_no in range(1, pages + 1):
+            try:
+                data = await self._gql(
+                    "items",
+                    "persisted:" + PERSISTED_QUERIES["items"],
+                    {
+                        "pagination": {"first": 24, "after": after},
+                        "filter": filt,
+                    },
+                )
+            except PlayerokError:
+                if not result:
+                    raise
+                self.partial = True
+                break
+            if on_page is not None:
+                await on_page(page_no, pages, len(result) + len(_get(data, "items", "edges", default=[]) or []))
             edges = _get(data, "items", "edges", default=[]) or []
             result += [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
             page = _get(data, "items", "pageInfo", default={}) or {}

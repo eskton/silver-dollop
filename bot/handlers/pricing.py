@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
+import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
@@ -20,6 +22,7 @@ from ..services import pricing
 from ..services.sellers import get_or_create_seller
 
 router = Router(name="pricing")
+log = logging.getLogger(__name__)
 
 
 class NominalInput(StatesGroup):
@@ -83,7 +86,6 @@ async def render_dumping(
         [_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")],
         [_btn(f"⏱ Проверять раз в {interval} мин", f"f:{feature.key}:p:dumping_interval_min")],
         [_btn("➕ Добавить лот", "dp:add"), _btn("▶️ Проверить сейчас", "dp:run")],
-        [_btn("🧮 Выгода по рынку (номиналы)", "dp:nom")],
     ]
     rows += [[_btn(f"🗑 {r.lot_key[:30]}", f"dp:del:{r.id}")] for r in rules]
     rows.append([_btn("‹ Назад", "st")])
@@ -202,6 +204,19 @@ async def run_now(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCiph
 # ----- цены по номиналам -----
 
 
+NOMINAL_TIMEOUT = 180  # секунд на весь отчёт
+_NOMINAL_RUNNING: set[int] = set()
+
+
+def _nominal_kb(divisor: float) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("🔄 Обновить", "dp:nomrun")],
+        [_btn("💵 Закупка", "dp:nomcost"), _btn(f"➗ Курс: {divisor:g}", "dp:nomdiv")],
+        [_btn("🔗 Другая категория", "dp:nomlink")],
+        [_btn("‹ К калькулятору", "pc")],
+    ])
+
+
 async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCipher, user) -> None:
     async with sessions() as session:
         seller = await get_or_create_seller(session, user)
@@ -214,19 +229,54 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
     if not seller.is_connected:
         await message.answer("Аккаунт Playerok не подключён.")
         return
-    await message.answer("🔎 Собираю цены. Playerok разрешает ~15 запросов в минуту, поэтому это 1–2 минуты…")
+    if user.id in _NOMINAL_RUNNING:
+        await message.answer("⏳ Отчёт уже собирается — дождись его.")
+        return
+    _NOMINAL_RUNNING.add(user.id)
+    status = await message.answer("🔎 Собираю цены конкурентов…")
+    last_edit = [0.0]
+
+    async def show(text: str, force: bool = False) -> None:
+        # Правим одно сообщение не чаще раза в 3 с, чтобы не упереться в лимиты Telegram.
+        import time
+
+        if not force and time.monotonic() - last_edit[0] < 3:
+            return
+        last_edit[0] = time.monotonic()
+        try:
+            await status.edit_text(text)
+        except Exception:
+            pass
+
+    async def on_page(page: int, pages: int, count: int) -> None:
+        await show(f"🔎 Собираю цены конкурентов… страница {page}/{pages}, лотов: {count}")
+
+    async def on_wait(note: str) -> None:
+        await show(f"🔎 Собираю цены конкурентов… ⏳ {note}", force=True)
+
     try:
         async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
-            text = await pricing.nominal_report(client, ref, divisor or 104.0, costs=costs,
-                                                own_user_id=seller.playerok_id)
+            client.on_wait = on_wait
+            text = await asyncio.wait_for(
+                pricing.nominal_report(client, ref, divisor or 104.0, costs=costs,
+                                       own_user_id=seller.playerok_id, on_page=on_page),
+                timeout=NOMINAL_TIMEOUT,
+            )
+    except asyncio.TimeoutError:
+        text = ("⚠️ Playerok слишком долго не отвечал (лимит запросов). Попробуй «🔄 Обновить» через "
+                "пару минут.")
     except (AuthRequired, PlayerokError) as e:
         text = f"⚠️ Playerok: <code>{html.escape(str(e))[:300]}</code>"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("🔄 Обновить", "dp:nomrun")],
-        [_btn("💵 Закупка", "dp:nomcost"), _btn(f"➗ Курс: {divisor:g}", "dp:nomdiv")],
-        [_btn("🔗 Другая категория", "dp:nomlink")],
-    ])
-    await message.answer(text[:4000], reply_markup=kb)
+    except Exception as e:  # чтобы бот не молчал при любой ошибке
+        log.exception("выгода по рынку: сбой")
+        text = f"⚠️ Ошибка: <code>{html.escape(e.__class__.__name__)}: {html.escape(str(e))[:200]}</code>"
+    finally:
+        _NOMINAL_RUNNING.discard(user.id)
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    await message.answer(text[:4000], reply_markup=_nominal_kb(divisor))
 
 
 @router.callback_query(F.data == "dp:nom")
