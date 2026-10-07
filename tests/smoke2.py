@@ -113,7 +113,8 @@ async def main():
         await ft.set_setting(s, tg, "confirm_reminder_enabled", "1")
         await ft.set_setting(s, tg, "bump_enabled", "1")
         await ft.set_setting(s, tg, "relist_enabled", "1")
-        await ft.set_setting(s, tg, "bump_daily_limit", "1")
+        await ft.set_setting(s, tg, "bump_daily_limit", "60")  # поднятие в подделке стоит 49 ₽ — хватит на одно
+        await ft.set_setting(s, tg, "bump_cost", "49")
         await ft.set_setting(s, tg, "relist_all", "0")
         from bot.db import RelistRule
         s.add(RelistRule(seller_tg_id=tg, pattern="стар"))

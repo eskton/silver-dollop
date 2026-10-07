@@ -1,36 +1,26 @@
+"""Список своих лотов — сохранённый запрос `items` (как PlayerokAPI.get_my_items)."""
 import asyncio, json, sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-from bot.playerok.client import PlayerokClient
-from bot.playerok import PlayerokError
+from bot.playerok.client import PERSISTED_QUERIES, PlayerokClient, RawResponse
 
-tries = []
-def make(ok_filter):
-    async def t(body, token):
-        f = body["variables"]["filter"]
-        tries.append(f)
-        if f == ok_filter:
-            return type("R",(),{"status":200,"text":json.dumps({"data":{"items":{"edges":[{"node":{"id":"i1","name":"X","status":"SOLD"}}]}}}),"token":None})()
-        return type("R",(),{"status":200,"text":json.dumps({"errors":[{"message":"Access denied"}]}),"token":None})()
-    return t
+calls = []
+async def t(body, token):
+    calls.append(body)
+    assert body["operationName"] == "items" and body["persisted"] == PERSISTED_QUERIES["items"]
+    assert "query" not in body  # текст запроса не шлём — только хеш
+    v = body["variables"]
+    page = 0 if v["pagination"]["after"] is None else int(v["pagination"]["after"])
+    edges = [{"node": {"id": f"i{page * 24 + k}", "name": f"L{k}", "status": "SOLD", "rawPrice": 50, "priority": "DEFAULT"}}
+             for k in range(24 if page == 0 else 5)]
+    info = {"hasNextPage": page == 0, "endCursor": str(page + 1)}
+    return RawResponse(200, json.dumps({"data": {"items": {"edges": edges, "pageInfo": info}}}), None)
 
 async def main():
-    PlayerokClient._items_filter = None
-    tries.clear()
-    cl = PlayerokClient("T", transport=make({"sellerId":"u1"}))
-    items = await cl.my_items("u1")
-    assert len(items)==1 and items[0].id=="i1"
-    assert PlayerokClient._items_filter == {"sellerId":"u1"}, PlayerokClient._items_filter
-    # второй вызов использует запомненный фильтр сразу
-    tries.clear()
-    await cl.my_items("u1")
-    assert tries == [{"sellerId":"u1"}], tries
-
-    # все варианты не подходят → PlayerokError
-    PlayerokClient._items_filter = None
-    cl2 = PlayerokClient("T", transport=make({"nope":1}))
-    try:
-        await cl2.my_items("u1"); raise AssertionError("ожидали ошибку")
-    except PlayerokError as e:
-        assert "Access denied" in str(e)
+    cl = PlayerokClient("T", transport=t)
+    items = await cl.my_items("u1", statuses=["SOLD"])
+    assert len(items) == 29 and len(calls) == 2, (len(items), len(calls))
+    v = calls[0]["variables"]
+    assert v["filter"] == {"userId": "u1", "status": ["SOLD"]} and v["pagination"]["first"] == 24
+    assert items[0].raw_price == 50 and items[0].priority == "DEFAULT"
     print("OK")
 asyncio.run(main())

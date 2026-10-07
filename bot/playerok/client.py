@@ -106,6 +106,9 @@ class Item:
     status: str
     position: int | None
     relist_price: float | None  # стоимость статуса размещения; 0/None — бесплатно
+    raw_price: float | None = None  # цена продавца без комиссии — по ней считаются тарифы
+    priority: str = ""  # DEFAULT / PREMIUM
+    may_be_published: bool | None = None
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> "Item":
@@ -118,6 +121,9 @@ class Item:
             status=str(_get(raw, "status", default="")),
             position=int(pos) if isinstance(pos, (int, float)) else None,
             relist_price=_get(raw, "priorityStatus", "price"),
+            raw_price=_get(raw, "rawPrice"),
+            priority=str(_get(raw, "priority", default="") or ""),
+            may_be_published=_get(raw, "mayBePublished"),
         )
 
     @property
@@ -219,6 +225,15 @@ def strip_field(query: str, field: str) -> str:
         pos = start
 
 
+# Сохранённые запросы сайта (GET + sha256 текста запроса). Сайт отдаёт эти данные
+# только так — на произвольный текст запроса `items` отвечал «Access denied».
+# Хеши — из PlayerokAPI (github.com/alleexxeeyy/PlayerokAPI, playerokapi/misc.py).
+PERSISTED_QUERIES = {
+    "items": "3f20c731f8f769a094ee3fa32e09f8e12250357e9a4f0ebb4e6988e7a0bb9260",
+    "item": "1cdb4b335f6c119db77883451f41cef83fc449f79f021627f27b76ec49203487",
+    "itemPriorityStatuses": "b922220c6f979537e1b99de6af8f5c13727daeff66727f679f07f986ce1c025a",
+}
+
 HEADERS = {
     "Accept": "*/*",
     "Content-Type": "application/json",
@@ -252,12 +267,30 @@ class PlayerokClient:
             proxy = os.getenv("PLAYEROK_PROXY", "").strip() or None
             self._session = AsyncSession(impersonate="chrome", timeout=self._timeout, proxy=proxy)
         rest_path = body.get("rest")
-        resp = await self._session.post(
-            BASE_URL + (rest_path or "/graphql"),
-            json=None if rest_path else body,
-            headers=HEADERS,
-            cookies={"token": token} if token else None,
-        )
+        op = str(body.get("operationName") or "")
+        headers = dict(HEADERS)
+        if not rest_path:
+            headers.update({
+                "apollographql-client-name": "web",
+                "x-apollo-operation-name": op,
+                "x-gql-op": op,
+                "x-gql-path": "/",
+            })
+        cookies = {"token": token} if token else None
+        if body.get("persisted"):
+            params = {
+                "operationName": op,
+                "variables": json.dumps(body.get("variables") or {}, ensure_ascii=False),
+                "extensions": json.dumps({"persistedQuery": {"version": 1, "sha256Hash": body["persisted"]}}),
+            }
+            resp = await self._session.get(BASE_URL + "/graphql", params=params, headers=headers, cookies=cookies)
+        else:
+            resp = await self._session.post(
+                BASE_URL + (rest_path or "/graphql"),
+                json=None if rest_path else body,
+                headers=headers,
+                cookies=cookies,
+            )
         return RawResponse(resp.status_code, resp.text, self._extract_token(resp, body))
 
     def _extract_token(self, resp: Any, body: dict[str, Any]) -> str | None:
@@ -311,9 +344,14 @@ class PlayerokClient:
         *,
         _retries: int = 0,
     ) -> dict[str, Any]:
-        # Если раньше из запроса уже выкидывали неизвестные поля — берём исправленный.
-        query = PATCHED_QUERIES.get(operation, query)
-        body = {"operationName": operation, "query": query, "variables": variables or {}}
+        persisted = query.startswith("persisted:")
+        if persisted:
+            # Сохранённый запрос: шлём только хеш, текст сайт знает сам.
+            body = {"operationName": operation, "variables": variables or {}, "persisted": query[10:]}
+        else:
+            # Если раньше из запроса уже выкидывали неизвестные поля — берём исправленный.
+            query = PATCHED_QUERIES.get(operation, query)
+            body = {"operationName": operation, "query": query, "variables": variables or {}}
         send = self._transport or self._curl_post
         try:
             resp = await send(body, self._token)
@@ -341,6 +379,11 @@ class PlayerokClient:
             first = errors[0] if isinstance(errors[0], dict) else {}
             message = str(first.get("message") or "неизвестная ошибка")
             code = str(_get(first, "extensions", "code", default="")).upper()
+            if "PERSISTED" in code or "PersistedQueryNotFound" in message:
+                raise PlayerokError(
+                    f"Playerok обновил сайт — сохранённый запрос {operation} устарел ({message}). "
+                    "Нужно обновить хеш в bot/playerok/client.py (PERSISTED_QUERIES)."
+                )
             if code in ("UNAUTHENTICATED", "FORBIDDEN") or "auth" in message.lower():
                 raise AuthRequired(message)
             var_type = VAR_TYPE_RE.search(message)
@@ -446,48 +489,82 @@ class PlayerokClient:
 
     # ----- лоты -----
 
-    # Playerok отвечал «Access denied» на фильтр {userId}. Форму фильтра
-    # заранее не знаем — перебираем варианты и запоминаем рабочий.
-    _items_filter: dict[str, Any] | None = None
-
-    def _items_filter_variants(self, user_id: str) -> list[dict[str, Any]]:
-        statuses = ["APPROVED", "SOLD", "EXPIRED", "DRAFT"]
-        return [
-            {"userId": user_id},
-            {"userId": user_id, "status": statuses},
-            {"sellerId": user_id},
-            {"user": user_id},
-            {"ownerId": user_id},
-            {},
-        ]
-
-    async def my_items(self, user_id: str, limit: int = 100) -> list[Item]:
-        variants = (
-            [PlayerokClient._items_filter]
-            if PlayerokClient._items_filter is not None
-            else self._items_filter_variants(user_id)
-        )
-        last: Exception | None = None
-        for filt in variants:
-            try:
-                data = await self._gql(
-                    "items", q.MY_ITEMS, {"pagination": {"first": limit}, "filter": filt}
-                )
-            except (AuthRequired, PlayerokError) as e:
-                # Любой вид фильтра может не подойти — пробуем следующий.
-                last = e
-                continue
-            PlayerokClient._items_filter = filt  # запомнили рабочий
+    async def my_items(
+        self, user_id: str, limit: int = 100, statuses: list[str] | None = None
+    ) -> list[Item]:
+        """Свои лоты (как в PlayerokAPI.get_my_items): сохранённый запрос `items`,
+        фильтр {userId, status}, по 24 за страницу."""
+        result: list[Item] = []
+        after: str | None = None
+        while len(result) < limit:
+            data = await self._gql(
+                "items",
+                "persisted:" + PERSISTED_QUERIES["items"],
+                {
+                    "pagination": {"first": min(24, limit - len(result)), "after": after},
+                    "filter": {"userId": user_id, "status": statuses or None},
+                    "showForbiddenImage": True,
+                },
+            )
             edges = _get(data, "items", "edges", default=[]) or []
-            return [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
-        if last is not None:
-            raise last
-        return []
+            result += [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+            page = _get(data, "items", "pageInfo", default={}) or {}
+            after = page.get("endCursor")
+            if not edges or not page.get("hasNextPage") or not after:
+                break
+        return result
 
-    async def bump_item(self, item_id: str) -> None:
-        await self._gql(
-            "increaseItemPriorityStatus", q.INCREASE_ITEM_PRIORITY, {"input": {"itemId": item_id}}
+    async def find_sold_item(self, user_id: str, name: str) -> Item | None:
+        """Проданный лот по названию. Так делает Playerok Universal: ID лота в сделке —
+        не тот лот, который нужно выставлять заново (republish по нему отвечал 404)."""
+        sold = await self.my_items(user_id, limit=48, statuses=["SOLD"])
+        exact = [i for i in sold if i.name == name]
+        if exact:
+            return exact[0]
+        target = " ".join(name.lower().split())
+        return next((i for i in sold if " ".join(i.name.lower().split()) == target), None)
+
+    async def get_item(self, item_id: str | None = None, slug: str | None = None) -> Item:
+        data = await self._gql(
+            "item",
+            "persisted:" + PERSISTED_QUERIES["item"],
+            {"id": item_id, "slug": slug, "hasSupportAccess": False, "showForbiddenImage": True},
         )
+        raw = _get(data, "item")
+        if not isinstance(raw, dict) or not raw.get("id"):
+            raise PlayerokError("Playerok не вернул лот")
+        return Item.from_raw(raw)
+
+    async def priority_statuses(self, item_id: str, raw_price: float) -> list[dict[str, Any]]:
+        data = await self._gql(
+            "itemPriorityStatuses",
+            "persisted:" + PERSISTED_QUERIES["itemPriorityStatuses"],
+            {"itemId": item_id, "price": int(raw_price)},
+        )
+        return [s for s in (_get(data, "itemPriorityStatuses") or []) if isinstance(s, dict)]
+
+    async def bump_item(self, item_id: str, *, max_cost: float | None = None) -> float:
+        """Поднятие = платный статус PREMIUM (как increase_item_priority_status в PlayerokAPI).
+        Возвращает цену. Если дороже max_cost — не поднимает."""
+        item = await self.get_item(item_id)
+        statuses = await self.priority_statuses(item.id, item.raw_price or item.price or 0)
+        prem = next((s for s in statuses if str(s.get("type")).upper() == "PREMIUM" or (s.get("price") or 0) > 0), None)
+        if prem is None:
+            raise PlayerokError("Playerok не предложил статус для поднятия")
+        cost = float(prem.get("price") or 0)
+        if max_cost is not None and cost > max_cost:
+            raise PaidPlacementRefused(f"поднятие стоит {cost:g} ₽ — больше лимита {max_cost:g} ₽")
+        await self._gql(
+            "increaseItemPriorityStatus",
+            q.INCREASE_ITEM_PRIORITY,
+            {"input": {
+                "itemId": item.id,
+                "priorityStatuses": [prem["id"]],
+                "transactionProviderData": {"paymentMethodId": None},
+                "transactionProviderId": "LOCAL",
+            }},
+        )
+        return cost
 
     async def _rest_post(self, path: str) -> Any:
         """POST в REST-часть сайта (/rest-api/public/...) тем же транспортом и cookie.
@@ -522,11 +599,6 @@ class PlayerokClient:
         (REST /item/{id}/republish, как в библиотеке PlayerokAPI)."""
         await self._rest_post(f"/rest-api/public/item/{item_id}/republish")
 
-    async def item_info(self, item_id: str | None = None, slug: str | None = None) -> dict[str, Any]:
-        variables = {"id": item_id} if item_id else {"slug": slug}
-        data = await self._gql("item", q.ITEM_PRICE, variables)
-        return _get(data, "item") or {}
-
     async def publish_item(
         self,
         item_id: str,
@@ -534,89 +606,76 @@ class PlayerokClient:
         price: float | None = None,
         allow_paid: bool = False,
         slug: str | None = None,
-    ) -> None:
-        """Выставляет проданный лот заново через GraphQL publishItem (как Playerok
-        Universal); если не вышло — REST «republish» (он для снятых с продажи)."""
-        try:
-            item_id = await self._publish_graphql(item_id, price=price, allow_paid=allow_paid, slug=slug)
-            return
-        except PaidPlacementRefused:
-            raise  # своё решение «не платить» — обходными путями не выставляем
-        except PlayerokError as e:
-            gql_error = str(e)
-        try:
-            await self.republish_item(item_id)
-        except PlayerokError as e:
-            raise PlayerokError(f"{gql_error} | republish: {e}") from e
-
-    async def _publish_graphql(
-        self,
-        item_id: str,
-        *,
-        price: float | None = None,
-        allow_paid: bool = False,
-        slug: str | None = None,
+        sold_name: str | None = None,
+        user_id: str | None = None,
     ) -> str:
-        """Playerok требует тариф (priorityStatuses) и способ оплаты (transactionProviderId)
-        даже для бесплатного размещения: берём тариф DEFAULT, оплата LOCAL (с баланса) —
-        при бесплатном тарифе списаний нет. Каждая ошибка подписана шагом — для диагностики.
-        Возвращает ID лота, с которым работали (по slug он может отличаться от ID из сделки)."""
-        status = "?"
-        info: dict[str, Any] = {}
-        lookup_errors = []
-        for by_id, by_slug in ((item_id, None), (None, slug)):
-            if not (by_id or by_slug):
-                continue
+        """Выставляет лот заново — по схеме Playerok Universal:
+        1) после продажи ищем свой лот со статусом SOLD по названию (sold_name);
+        2) сохранённый запрос `item` → rawPrice, priority, mayBePublished;
+        3) `itemPriorityStatuses` по rawPrice → тариф (DEFAULT, а для PREMIUM-лота — PREMIUM);
+        4) publishItem {itemId, priorityStatuses:[id], transactionProviderId: LOCAL}.
+        Каждая ошибка подписана шагом. Возвращает ID выставленного лота."""
+        step = "поиск проданного лота"
+        try:
+            if sold_name and user_id:
+                try:
+                    found = await self.find_sold_item(user_id, sold_name)
+                except (AuthRequired, PlayerokError) as e:
+                    found = None
+                    log.info("publish: список проданных лотов недоступен (%s), беру ID из сделки", e)
+                if found is not None:
+                    item_id = found.id
+                else:
+                    log.info("publish: проданный лот «%s» не найден среди SOLD, беру ID из сделки", sold_name)
+            step = "лот"
             try:
-                info = await self.item_info(by_id, by_slug)
-            except PlayerokError as e:
-                lookup_errors.append(f"лот по {'id' if by_id else 'ссылке'}: {e}")
-                continue
-            if info:
-                break
-        if info.get("id") and info["id"] != item_id:
-            log.info("publish: ID из сделки %s, ID лота по ссылке %s", item_id, info["id"])
-            item_id = str(info["id"])
-        status = str(info.get("status") or "?")
-        if isinstance(info.get("price"), (int, float)) and info["price"] > 0:
-            price = float(info["price"])
-        if price is None:
-            raise PlayerokError(
-                "не узнать цену лота" + (f" ({'; '.join(lookup_errors)})" if lookup_errors else "")
-            )
-        try:
-            data = await self._gql(
-                "itemPriorityStatuses", q.ITEM_PRIORITY_STATUSES, {"itemId": item_id, "price": price}
-            )
-        except PlayerokError as e:
-            extra = f"; {'; '.join(lookup_errors)}" if lookup_errors else ""
-            raise PlayerokError(f"тарифы: {e} [лот: {status}, цена {price:g}{extra}]") from e
-        statuses = [s for s in (_get(data, "itemPriorityStatuses") or []) if isinstance(s, dict)]
-        free = next((s for s in statuses if str(s.get("type")).upper() == "DEFAULT"), None)
-        if free is None:
-            raise PlayerokError("Playerok не предложил обычный (бесплатный) тариф размещения")
-        cost = free.get("price") or 0
-        if cost and not allow_paid:
-            raise PaidPlacementRefused(
-                f"размещение платное ({cost:g} ₽), а платное восстановление выключено в настройках"
-            )
-        try:
+                item = await self.get_item(item_id)
+            except PlayerokError:
+                if not slug:
+                    raise
+                item = await self.get_item(slug=slug)
+            if item.may_be_published is False:
+                raise PlayerokError(
+                    "Playerok не даёт выставить этот лот повторно (так бывает в некоторых категориях) — "
+                    "создай лот заново вручную"
+                )
+            raw_price = item.raw_price or item.price or price
+            if not raw_price:
+                raise PlayerokError("Playerok не отдал цену лота")
+            step = "тарифы"
+            statuses = await self.priority_statuses(item.id, raw_price)
+            premium = item.priority.upper() == "PREMIUM"
+            if premium:
+                # премиум-лот Playerok не выставляет с бесплатным статусом
+                status = next((s for s in statuses if str(s.get("type")).upper() == "PREMIUM"
+                               or (s.get("price") or 0) > 0), None)
+            else:
+                status = next((s for s in statuses if str(s.get("type")).upper() == "DEFAULT"
+                               or (s.get("price") or 0) == 0), None) or (statuses[0] if statuses else None)
+            if status is None:
+                raise PlayerokError("Playerok не предложил статус размещения")
+            cost = float(status.get("price") or 0)
+            if cost and not allow_paid:
+                raise PaidPlacementRefused(
+                    f"размещение платное ({cost:g} ₽), а платное восстановление выключено в настройках"
+                )
+            step = "publishItem"
             await self._gql(
                 "publishItem",
                 q.PUBLISH_ITEM,
                 {"input": {
-                    "itemId": item_id,
-                    "priorityStatuses": [free["id"]],
                     "transactionProviderId": "LOCAL",
-                    "transactionProviderData": {"paymentMethodId": None},
+                    "priorityStatuses": [status["id"]],
+                    "itemId": item.id,
                 }},
             )
+            return item.id
+        except PaidPlacementRefused:
+            raise
+        except AuthRequired:
+            raise
         except PlayerokError as e:
-            # Для диагностики: статус лота и выбранный тариф (без личных данных).
-            raise PlayerokError(
-                f"publishItem: {e} [лот: {status}, цена {price:g}, тариф {free.get('name') or 'DEFAULT'} {cost:g} ₽]"
-            ) from e
-        return item_id
+            raise PlayerokError(f"{step}: {e}") from e
 
     # ----- чаты -----
 

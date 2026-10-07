@@ -1,74 +1,78 @@
-"""publishItem: бесплатный тариф DEFAULT + LOCAL; платный — только если разрешено."""
+"""Перевыставление по схеме Playerok Universal: SOLD-лот по названию → item → тарифы → publishItem."""
 import asyncio, json, sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
-from bot.playerok.client import PlayerokClient, PlayerokError, RawResponse
+from bot.playerok.client import PaidPlacementRefused, PlayerokClient, PlayerokError, RawResponse
 
-M = {"cost": 0, "published": [], "item_fails": False, "rest_ok": False, "rest": []}
+M = {"cost": 0, "published": [], "bodies": []}
+ITEMS = {
+    "listing-1": {"id": "listing-1", "name": "💰 50 РОБУКСОВ | ПРОМОКОД", "rawPrice": 45, "price": 50,
+                  "status": "SOLD", "priority": "DEFAULT", "mayBePublished": True},
+    "prem-1": {"id": "prem-1", "name": "Премиум лот", "rawPrice": 90, "price": 100,
+               "status": "SOLD", "priority": "PREMIUM", "mayBePublished": True},
+    "acc-1": {"id": "acc-1", "name": "Аккаунт", "rawPrice": 300, "price": 330,
+              "status": "SOLD", "priority": "DEFAULT", "mayBePublished": False},
+}
 async def pk(body, token):
+    M["bodies"].append(body)
     op, v = body["operationName"], body["variables"]
-    if op.startswith("rest:"):
-        M["rest"].append(body["rest"])
-        if M["rest_ok"]:
-            return RawResponse(200, "", None)
-        return RawResponse(500, json.dumps({"message": "Something gone wrong"}), None)
+    if op == "items":
+        assert body.get("persisted") and v["filter"]["status"] == ["SOLD"]
+        edges = [{"node": i} for i in ITEMS.values()]
+        return RawResponse(200, json.dumps({"data": {"items": {"edges": edges, "pageInfo": {"hasNextPage": False}}}}), None)
     if op == "item":
-        if v.get("slug") == "real-lot":
-            return RawResponse(200, json.dumps({"data": {"item": {"id": "listing-1", "price": 77, "status": "SOLD"}}}), None)
-        if v.get("id") == "deal-copy":
+        assert body.get("persisted")
+        it = ITEMS.get(v["id"])
+        if it is None:
             return RawResponse(200, json.dumps({"errors": [{"message": "Something gone wrong"}]}), None)
-        if M["item_fails"]:
-            return RawResponse(200, json.dumps({"errors": [{"message": "Access denied"}]}), None)
-        return RawResponse(200, json.dumps({"data": {"item": {"id": v["id"], "price": 120}}}), None)
+        return RawResponse(200, json.dumps({"data": {"item": it}}), None)
     if op == "itemPriorityStatuses":
+        assert body.get("persisted") and isinstance(v["price"], int)
         M["price"] = v["price"]
         return RawResponse(200, json.dumps({"data": {"itemPriorityStatuses": [
-            {"id": "vip", "type": "VIP", "price": 300},
+            {"id": "prem", "type": "PREMIUM", "price": 30},
             {"id": "def", "type": "DEFAULT", "price": M["cost"]}]}}), None)
     if op == "publishItem":
-        if M.get("pub_fail"):
-            return RawResponse(200, json.dumps({"errors": [{"message": "Something gone wrong"}]}), None)
+        assert "query" in body and not body.get("persisted")
         M["published"].append(v["input"])
         return RawResponse(200, json.dumps({"data": {"publishItem": {"id": v["input"]["itemId"]}}}), None)
+    if op == "increaseItemPriorityStatus":
+        M["bumped"] = v["input"]
+        return RawResponse(200, json.dumps({"data": {"increaseItemPriorityStatus": {"id": v["input"]["itemId"]}}}), None)
     raise AssertionError(op)
-PlayerokClient._curl_post = lambda self, body, token: pk(body, token)
 
 async def main():
-    async with PlayerokClient("T") as c:
-        await c.publish_item("i1", price=5)
-        assert M["price"] == 120  # цена лота с Playerok важнее цены из сделки
-        assert M["published"][-1] == {"itemId": "i1", "priorityStatuses": ["def"], "transactionProviderId": "LOCAL",
-                                       "transactionProviderData": {"paymentMethodId": None}}
-        print("1. бесплатный тариф DEFAULT, оплата LOCAL")
-        M["item_fails"] = True
-        await c.publish_item("i2", price=5)
-        assert M["price"] == 5
-        print("2. цена лота недоступна → берём цену из сделки")
-        M["cost"] = 15
-        try:
-            await c.publish_item("i3", price=5)
-            raise AssertionError("должно было отказать")
-        except PlayerokError as e:
-            assert "платное" in str(e)
-        assert len(M["published"]) == 2
-        await c.publish_item("i3", price=5, allow_paid=True)
-        assert len(M["published"]) == 3
-        print("3. платное размещение только при разрешении")
-        assert M["rest"] == [], M["rest"]  # при успехе publishItem REST не нужен
-        M["pub_fail"] = True; M["cost"] = 0; M["item_fails"] = False
-        try:
-            await c.publish_item("i4", price=5)
-            raise AssertionError("должно было отказать")
-        except PlayerokError as e:
-            msg = str(e)
-        assert "Something gone wrong" in msg and "republish: HTTP 500" in msg and "цена 120" in msg, msg
-        M["rest_ok"] = True
-        await c.publish_item("i5", price=5)
-        assert M["rest"][-1] == "/rest-api/public/item/i5/republish", M["rest"]
-        print("4. publishItem отказал → REST republish; в ошибке оба ответа и тариф")
-
-        M["pub_fail"] = False; M["rest_ok"] = False
-        await c.publish_item("deal-copy", price=5, slug="real-lot")
-        assert M["published"][-1]["itemId"] == "listing-1" and M["price"] == 77, M["published"][-1]
-        print("5. ID из сделки не найден → лот найден по ссылке и выставлен")
+    c = PlayerokClient("T", transport=pk)
+    # 1. после продажи: ID из сделки не тот — настоящий лот находим среди SOLD по названию
+    got = await c.publish_item("deal-item-id", price=50, sold_name="💰 50 РОБУКСОВ | ПРОМОКОД", user_id="me")
+    assert got == "listing-1" and M["price"] == 45, (got, M.get("price"))
+    assert M["published"][-1] == {"transactionProviderId": "LOCAL", "priorityStatuses": ["def"], "itemId": "listing-1"}
+    print("1. лот найден среди проданных по названию, выставлен бесплатно (DEFAULT, LOCAL, по rawPrice)")
+    # 2. премиум-лот выставляется только премиум-статусом и только если платное разрешено
+    try:
+        await c.publish_item("prem-1"); raise AssertionError("должен отказать")
+    except PaidPlacementRefused as e:
+        assert "30" in str(e)
+    await c.publish_item("prem-1", allow_paid=True)
+    assert M["published"][-1]["priorityStatuses"] == ["prem"]
+    print("2. премиум-лот — только с разрешения платного восстановления")
+    # 3. mayBePublished=false → понятная ошибка
+    try:
+        await c.publish_item("acc-1"); raise AssertionError("должен отказать")
+    except PlayerokError as e:
+        assert "лот:" in str(e) and "повторно" in str(e), e
+    # 4. ошибки подписаны шагом
+    try:
+        await c.publish_item("nope"); raise AssertionError("должен отказать")
+    except PlayerokError as e:
+        assert str(e).startswith("лот: Something gone wrong"), e
+    print("3-4. «нельзя выставить повторно» и шаг ошибки видны в тексте")
+    # 5. поднятие — платный PREMIUM, с лимитом
+    try:
+        await c.bump_item("listing-1", max_cost=10); raise AssertionError("должен отказать")
+    except PaidPlacementRefused:
+        pass
+    assert await c.bump_item("listing-1", max_cost=100) == 30
+    assert M["bumped"]["priorityStatuses"] == ["prem"] and M["bumped"]["transactionProviderId"] == "LOCAL"
+    print("5. поднятие: премиум-статус, не дороже лимита")
     print("OK")
 asyncio.run(main())

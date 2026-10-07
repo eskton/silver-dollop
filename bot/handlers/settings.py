@@ -732,7 +732,7 @@ async def _fetch_candidates(sessions: SessionFactory, seller, cipher: TokenCiphe
     """Возвращает (список лотов-кандидатов, текст ошибки или None)."""
     try:
         async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
-            items = await client.my_items(seller.playerok_id or "")
+            items = await client.my_items(seller.playerok_id or "", statuses=["APPROVED", "SOLD", "EXPIRED"])
     except AuthRequired as e:
         return [], f"Playerok не отдал лоты (похоже на проблему доступа): {e}"
     except PlayerokError as e:
@@ -772,11 +772,16 @@ async def relist_preview(cb: CallbackQuery, sessions: SessionFactory, cipher: To
     await cb.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
-async def _restore(client: PlayerokClient, sessions: SessionFactory, tg: int, item_id: str, name: str) -> str:
+async def _restore(
+    client: PlayerokClient, sessions: SessionFactory, tg: int, item_id: str, name: str,
+    *, after_sale: bool = False,
+) -> str:
+    """after_sale — ID взят из сделки: настоящий лот ищем среди проданных по названию."""
     from ..db import ActionLog
 
     async with sessions() as session:
         allow_paid = await ft.get_flag(session, tg, "relist_paid_allowed", False)
+        seller = await session.get(Seller, tg)
         known = await session.scalar(
             select(DealState).where(DealState.seller_tg_id == tg, DealState.item_id == item_id)
             .order_by(DealState.id.desc()).limit(1)
@@ -789,6 +794,8 @@ async def _restore(client: PlayerokClient, sessions: SessionFactory, tg: int, it
         await client.publish_item(
             item_id, price=known.price if known is not None else None, allow_paid=allow_paid,
             slug=slug if slug and slug != item_id else None,
+            sold_name=(known.item_name if known is not None else None) if after_sale else None,
+            user_id=seller.playerok_id if seller is not None else None,
         )
     except (AuthRequired, PlayerokError) as e:
         return f"❌ {html.escape(name)}: {html.escape(str(e))[:600]}"
@@ -857,7 +864,7 @@ async def relist_publish_now(cb: CallbackQuery, sessions: SessionFactory, cipher
         return
     await cb.answer("Выставляю…")
     async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
-        result = await _restore(client, sessions, seller.tg_id, item_id, "Лот")
+        result = await _restore(client, sessions, seller.tg_id, item_id, "Лот", after_sale=True)
     await cb.message.answer(result.replace("✅ ", "✅ Выставлен заново: ", 1))
 
 

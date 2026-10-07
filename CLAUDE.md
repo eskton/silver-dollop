@@ -72,32 +72,28 @@ volume.
 
 ## Что НЕ проверено / открытые задачи
 
-- Запрос лотов (`items`) отвечал «Access denied» с фильтром `{userId}`; добавлен перебор
-  вариантов фильтра (`client.my_items`). Нужно, чтобы владелец нажал «👁 Показать и
-  восстановить вручную» и прислал результат. От этого зависят автоподнятие и
-  перевыставление.
+- Лоты/перевыставление/поднятие переделаны по рабочей библиотеке PlayerokAPI и боту
+  Playerok Universal (github.com/alleexxeeyy, raw.githubusercontent.com доступен из облака;
+  сам playerok.com из облака — 403 DDoS-Guard geoblock). Ключевое:
+  `items`, `item`, `itemPriorityStatuses` — только сохранённые запросы (GET /graphql,
+  `extensions.persistedQuery.sha256Hash`, хеши в `client.PERSISTED_QUERIES`); на текст
+  запроса `items` сайт отвечал «Access denied». Перевыставление после продажи: свой лот
+  со статусом SOLD ищется по названию (`find_sold_item`) — ID лота в сделке не тот
+  (republish по нему → 404); затем `item` (rawPrice, priority, mayBePublished) → тарифы по
+  int(rawPrice) → publishItem {itemId, priorityStatuses:[id], transactionProviderId:LOCAL}.
+  PREMIUM-лот — только премиум-статусом (платно, при «Платное восстановление»);
+  mayBePublished=false — Playerok не даёт выставить повторно. Поднятие = PREMIUM-статус
+  через increaseItemPriorityStatus (+transactionProviderData), цена от Playerok, лимит/сутки.
+  Если хеш устареет — ошибка «сохранённый запрос … устарел»: взять новый из misc.py PlayerokAPI.
+  Вживую после этой правки ещё не проверено.
 - Автоподтверждение (`updateDeal` → `SENT`) вживую не подтверждено; при ошибке бот шлёт
   продавцу её текст один раз на заказ. После автовыдачи заказ отмечается выполненным
   автоматически (флаг `autodelivery_confirm`, по умолчанию вкл., переключатель в экране
   Автовыдачи), даже если функция «Автоподтверждение» выключена.
-- Перевыставление теперь идёт прямо по сделке (`relist_after_sale`, ID лота из сделки),
-  без списка лотов; плюс кнопка «🔄 Выставить заново» в уведомлении о заказе. Работает
-  только для сделок, появившихся после этой версии (`DealState.relisted is False`; у
-  старых строк NULL). `publishItem` вживую ответил: обязателен `transactionProviderId`.
-  Теперь (как в библиотеке PlayerokAPI): цена лота (`item`) → `itemPriorityStatuses` →
-  тариф `DEFAULT` → `publishItem {itemId, priorityStatuses:[id], transactionProviderId:"LOCAL"}`.
-  Если DEFAULT платный и «Платное восстановление» выключено — отказ с текстом.
-  Вживую: publishItem → «Something gone wrong», REST `/rest-api/public/item/{id}/republish`
-  → 404 «Failed to find record» (republish — для снятых с продажи, не проданных). Сейчас:
-  publishItem (+`transactionProviderData:{paymentMethodId:null}`, как Playerok Universal),
-  затем REST; в ошибке оба ответа + статус лота, цена, тариф.
-  Затем вживую ошибка без «[лот: …]» → падал запрос `item`/тарифов, не publishItem. Теперь
-  лот ищется по id из сделки, затем по slug из ссылки (ID лота может отличаться от ID
-  в сделке); ошибки подписаны шагом: «лот по id/ссылке», «тарифы:», «publishItem:».
-  Экран «Автовыставление» показывает продажи за 48 ч и судьбу лота (✅/❌/⏳/⏸ с
-  причиной) по `DealState.item_id/item_url/relist_note`, без запроса к Playerok.
-- Поднятие лота (`increaseItemPriorityStatus`), перевыставление (`publishItem`),
-  `markChatAsRead`, отзыв внутри сделки (поля `review` у ItemDeal нет) — запросы
+- Экран «Автовыставление» показывает продажи за 48 ч и судьбу лота (✅/❌/⏳/⏸ с
+  причиной) по `DealState.item_id/item_url/relist_note`, без запроса к Playerok; кнопка
+  «🔄» (rl:pub) ищет проданный лот по названию.
+- `markChatAsRead`, отзыв внутри сделки (поля `review` у ItemDeal нет) — запросы
   написаны вслепую.
 - Плагин звёзд (Fragment) целиком не проверен: нужны cookies fragment.com, seed отдельного
   кошелька, «🔎 Проверить», затем пробный заказ на 50 звёзд. Методы Fragment — в

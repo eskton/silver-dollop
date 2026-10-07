@@ -558,7 +558,7 @@ async def process_items(
         # Ошибки запроса лотов НЕ должны разлогинивать продавца: продажи и чаты
         # работают отдельно, а поднятие/перевыставление — вторично.
         try:
-            items = await client.my_items(seller.playerok_id or "")
+            items = await client.my_items(seller.playerok_id or "", statuses=["APPROVED", "SOLD", "EXPIRED"])
         except (AuthRequired, PlayerokError) as e:
             # Пишем не чаще раза в 6 ч: перевыставление после продажи этот список
             # не использует, от него зависят только автоподнятие и ручной просмотр.
@@ -588,12 +588,13 @@ async def process_items(
                 if spent + cost > limit:
                     break
                 try:
-                    await client.bump_item(item.id)
+                    # реальную цену поднятия Playerok сообщает сам; дороже остатка лимита — не поднимаем
+                    real_cost = await client.bump_item(item.id, max_cost=limit - spent)
                 except PlayerokError as e:
                     log.warning("%s поднятие лота %s: %s", tag(tg), item.id, e)
                     continue
-                spent += cost
-                session.add(ActionLog(seller_tg_id=tg, kind="bump", target=item.id, cost=cost))
+                spent += real_cost
+                session.add(ActionLog(seller_tg_id=tg, kind="bump", target=item.id, cost=real_cost))
                 await session.commit()
                 await notify(bot, session, tg, "system", f"🚀 Поднял лот «{html.escape(item.name)}».")
 
@@ -707,6 +708,8 @@ async def relist_after_sale(
             price=deal.price if isinstance(deal.price, (int, float)) else None,
             allow_paid=await ft.get_flag(session, tg, "relist_paid_allowed", False),
             slug=deal.item_slug or None,
+            sold_name=deal.item_name,
+            user_id=seller.playerok_id,
         )
     except PlayerokError as e:
         log.warning("%s перевыставление: Playerok отказал для лота %s (сделка %s): %s",

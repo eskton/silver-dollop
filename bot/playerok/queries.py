@@ -80,26 +80,6 @@ query deals($pagination: Pagination, $filter: ItemDealFilter!) {
 # Поднятие на Playerok платное (покупка статуса приоритета), поэтому в боте
 # есть суточный лимит. Название мутации и аргументы сверить в DevTools.
 
-MY_ITEMS = """
-query items($pagination: Pagination, $filter: ItemFilter) {
-  items(pagination: $pagination, filter: $filter) {
-    edges {
-      node {
-        id
-        slug
-        name
-        price
-        status
-        priorityPosition
-        priorityStatus {
-          id
-          price
-        }
-      }
-    }
-  }
-}
-"""
 
 INCREASE_ITEM_PRIORITY = """
 mutation increaseItemPriorityStatus($input: PublishItemInput!) {
@@ -119,26 +99,7 @@ mutation publishItem($input: PublishItemInput!) {
 }
 """
 
-ITEM_PRICE = """
-query item($id: UUID, $slug: String) {
-  item(id: $id, slug: $slug) {
-    id
-    price
-    status
-  }
-}
-"""
 
-ITEM_PRIORITY_STATUSES = """
-query itemPriorityStatuses($itemId: UUID, $price: NonNegativeFloat!) {
-  itemPriorityStatuses(itemId: $itemId, price: $price) {
-    id
-    name
-    type
-    price
-  }
-}
-"""
 
 UPDATE_DEAL = """
 mutation updateDeal($input: UpdateItemDealInput!) {
