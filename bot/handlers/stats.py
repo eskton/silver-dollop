@@ -13,8 +13,7 @@ from sqlalchemy import delete, select
 from ..db import ProfitRule, SessionFactory
 from ..keyboards import BTN_STATS, cancel_kb, is_cancel, main_menu
 from ..playerok import AuthRequired, PlayerokError
-from ..services import features as ft
-from ..services.analytics import PROFIT_FEE_KEY, build_report, profit_report
+from ..services.analytics import build_report, profit_report
 from ..services.history import import_history
 from ..services.sellers import disconnect_seller, get_or_create_seller
 
@@ -32,15 +31,25 @@ REFRESH_KB = InlineKeyboardMarkup(
 class ProfitInput(StatesGroup):
     keyword = State()
     cost = State()
-    fee = State()
 
 
-def _num(text: str) -> float | None:
+CURRENCIES = {"$": "$", "usd": "$", "₽": "₽", "р": "₽", "руб": "₽", "rub": "₽", "€": "€", "eur": "€"}
+
+
+def parse_money(text: str) -> tuple[float, str] | None:
+    """«0.05$», «$0,05», «5 ₽», «5 руб» → (сумма, валюта). Без валюты — доллары."""
+    t = text.strip().lower().replace(" ", "").replace(",", ".")
+    cur = "$"
+    for suffix, sym in sorted(CURRENCIES.items(), key=lambda x: -len(x[0])):
+        if t.endswith(suffix) or t.startswith(suffix):
+            cur = sym
+            t = t[len(suffix):] if t.startswith(suffix) else t[: -len(suffix)]
+            break
     try:
-        value = float(text.replace(" ", "").replace(",", ".").rstrip("₽%"))
+        value = float(t)
     except ValueError:
         return None
-    return value if value >= 0 else None
+    return (value, cur) if value >= 0 else None
 
 
 @router.message(Command("stats"))
@@ -105,8 +114,7 @@ async def _profit_screen(sessions: SessionFactory, tg: int) -> tuple[str, Inline
         rules = list(await session.scalars(select(ProfitRule).where(ProfitRule.seller_tg_id == tg)))
     btn = InlineKeyboardButton
     rows = [
-        [btn(text="➕ Добавить слово", callback_data="pc:add"), btn(text="🔄 Пересчитать", callback_data="pc")],
-        [btn(text="💸 Комиссия Playerok, %", callback_data="pc:fee")],
+        [btn(text="➕ Добавить товар", callback_data="pc:add"), btn(text="🔄 Пересчитать", callback_data="pc")],
     ]
     rows += [[btn(text=f"🗑 {r.keyword[:30]}", callback_data=f"pc:del:{r.id}")] for r in rules]
     rows.append([btn(text="‹ К аналитике", callback_data="stats:refresh")])
@@ -128,7 +136,7 @@ async def profit_add(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ProfitInput.keyword)
     await cb.answer()
     await cb.message.answer(
-        "Пришли ключевое слово из названия лота, например <code>100 робуксов</code>.\n"
+        "Пришли название лота или ключевое слово из него, например <code>50 робуксов</code>.\n"
         "Регистр, эмодзи и знаки не важны.",
         reply_markup=cancel_kb(),
     )
@@ -138,47 +146,26 @@ async def profit_add(cb: CallbackQuery, state: FSMContext) -> None:
 async def profit_keyword(message: Message, state: FSMContext) -> None:
     await state.update_data(keyword=message.text.strip()[:255])
     await state.set_state(ProfitInput.cost)
-    await message.answer("Себестоимость одной штуки в рублях (сколько тратишь на закупку). Например <code>45</code> или <code>0</code>:")
+    await message.answer(
+        "Чистая прибыль с одной продажи. Например <code>0.05$</code> или <code>5₽</code> "
+        "(без валюты — доллары):"
+    )
 
 
 @router.message(ProfitInput.cost, F.text, ~F.text.func(is_cancel))
 async def profit_cost(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
-    cost = _num(message.text)
-    if cost is None:
-        await message.answer("Нужно число, например 45 или 12,5.")
+    parsed = parse_money(message.text)
+    if parsed is None:
+        await message.answer("Нужна сумма, например 0.05$ или 5₽.")
         return
+    value, cur = parsed
     keyword = (await state.get_data())["keyword"]
     await state.clear()
     async with sessions() as session:
-        session.add(ProfitRule(seller_tg_id=message.from_user.id, keyword=keyword, cost=cost))
+        session.add(ProfitRule(seller_tg_id=message.from_user.id, keyword=keyword, cost=value, currency=cur))
         await session.commit()
         seller = await get_or_create_seller(session, message.from_user)
     await message.answer("✅ Добавлено.", reply_markup=main_menu(seller.is_connected))
-    text, kb = await _profit_screen(sessions, message.from_user.id)
-    await message.answer(text, reply_markup=kb)
-
-
-@router.callback_query(F.data == "pc:fee")
-async def profit_fee_ask(cb: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(ProfitInput.fee)
-    await cb.answer()
-    await cb.message.answer(
-        "Какой процент Playerok удерживает с продажи? Например <code>10</code>. Если не знаешь — <code>0</code>.",
-        reply_markup=cancel_kb(),
-    )
-
-
-@router.message(ProfitInput.fee, F.text, ~F.text.func(is_cancel))
-async def profit_fee_save(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
-    fee = _num(message.text)
-    if fee is None or fee >= 100:
-        await message.answer("Нужно число от 0 до 99.")
-        return
-    await state.clear()
-    async with sessions() as session:
-        await ft.set_setting(session, message.from_user.id, PROFIT_FEE_KEY, f"{fee:g}")
-        seller = await get_or_create_seller(session, message.from_user)
-    await message.answer(f"✅ Комиссия: {fee:g}%.", reply_markup=main_menu(seller.is_connected))
     text, kb = await _profit_screen(sessions, message.from_user.id)
     await message.answer(text, reply_markup=kb)
 

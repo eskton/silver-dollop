@@ -33,8 +33,8 @@ Telegram-бот — помощник продавцов на playerok.com (ан�
 - `services/features.py` — реестр функций, шаблоны с переменными `{Имя_Клиента}` и т.п.
 - `services/notifications.py` — все уведомления продавцу (9 типов, вкл/выкл, звук).
 - `services/analytics.py`, `services/history.py` — аналитика и импорт истории продаж.
-  Калькулятор прибыли (Аналитика → «🧮»): `ProfitRule` (слово + себестоимость/шт), комиссия
-  `profit_fee_pct`; по своим продажам из `DealState` за 1/7/30 дней, слово — целыми словами.
+  Калькулятор прибыли (Аналитика → «🧮»): `ProfitRule` (слово + чистая прибыль с 1 продажи в
+  `cost`, валюта `currency`, по умолчанию $); продано шт за 1/7/30 дней × прибыль. Комиссии нет.
 - `handlers/` — экраны бота (settings = автоматизация, account = профиль, stats, admin).
 - `plugins/` — платные плагины. `access.py` — выдача доступа (`/grant`, `/revoke`,
   `/access`, `/sellers`). `plugins/stars/` — звёзды через Fragment за USDT (TON).

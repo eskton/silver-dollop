@@ -1,52 +1,47 @@
-"""Калькулятор прибыли по ключевым словам: 1/7/30 дней."""
-import asyncio, os, sys
+"""Калькулятор прибыли: продано шт × чистая прибыль с продажи, за 1/7/30 дней."""
+import asyncio, os, re, sys, pathlib
 from datetime import datetime, timedelta
 os.environ["SECRET_KEY"] = __import__("cryptography.fernet", fromlist=["Fernet"]).Fernet.generate_key().decode()
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from bot.db import init_db, DealState, ProfitRule
-from bot.services import features as ft
-from bot.services.analytics import PROFIT_FEE_KEY, profit_report
-from bot.handlers.stats import _num
+from bot.services.analytics import profit_report
+from bot.handlers.stats import parse_money
 
 async def main():
     sessions = await init_db("sqlite+aiosqlite:///:memory:")
     now = datetime.utcnow()
-    def deal(i, name, price, hours_ago, status="CONFIRMED"):
-        return DealState(seller_tg_id=1, deal_id=f"d{i}", item_name=name, price=price, status=status,
+    def deal(i, name, hours_ago, status="CONFIRMED"):
+        return DealState(seller_tg_id=1, deal_id=f"d{i}", item_name=name, price=100, status=status,
                          created_at=now - timedelta(hours=hours_ago), first_seen_at=now)
+    LOT = "💰 50 РОБУКСОВ | ПРОМОКОД | ВЫДАЧА ЗА 1 СЕК 💎"
     async with sessions() as s:
         s.add_all([
-            deal(1, "💰 100 РОБУКСОВ | ПРОМОКОД 💎", 100, 2),         # 1 день
-            deal(2, "✅ДЛЯ РФ✅100 робуксов по коду", 120, 30),        # 7 дней
-            deal(3, "100 Робуксов", 100, 24 * 20),                    # 30 дней
-            deal(4, "100 робуксов", 100, 24 * 40),                    # старше 30 дней
-            deal(5, "100 робуксов", 100, 1, status="ROLLBACK"),       # возврат — не считаем
-            deal(6, "500 робуксов", 400, 1),                          # другое слово
-            deal(7, "2100 робуксов", 700, 1),                         # «100 робуксов» не цепляет «2100 робуксов»
+            deal(1, LOT, 2), deal(2, LOT, 5),                 # 1 день
+            deal(3, LOT, 30),                                 # 7 дней
+            deal(4, LOT, 24 * 20),                            # 30 дней
+            deal(5, LOT, 24 * 40),                            # старше 30 дней
+            deal(6, LOT, 1, status="ROLLBACK"),               # возврат — не считаем
+            deal(7, "150 робуксов", 1),                       # «50 робуксов» не цепляет «150 робуксов»
         ])
-        s.add(ProfitRule(seller_tg_id=1, keyword="100 робуксов", cost=60))
-        s.add(ProfitRule(seller_tg_id=1, keyword="500 РОБУКСОВ", cost=300))
+        # пользователь вставил полное название лота с эмодзи
+        s.add(ProfitRule(seller_tg_id=1, keyword=LOT, cost=0.05, currency="$"))
+        s.add(ProfitRule(seller_tg_id=1, keyword="50 робуксов", cost=5, currency="₽"))
         await s.commit()
-        await ft.set_setting(s, 1, PROFIT_FEE_KEY, "10")
         text = await profit_report(s, 1, now)
     print(text)
-    block = text.split("🔑")[1]
-    # 1 день: 1 шт, 100 ₽, прибыль 100*0.9-60 = 30
-    assert "1 день: 1 шт · выручка 100 ₽ · прибыль <b>30 ₽</b>" in block, block
-    # 7 дней: 2 шт, 220 ₽, 198-120 = 78
-    assert "7 дней: 2 шт · выручка 220 ₽ · прибыль <b>78 ₽</b>" in block, block
-    # 30 дней: 3 шт, 320 ₽, 288-180 = 108
-    assert "30 дней: 3 шт · выручка 320 ₽ · прибыль <b>108 ₽</b>" in block, block
-    b500 = text.split("🔑")[2]
-    assert "1 день: 1 шт · выручка 400 ₽ · прибыль <b>60 ₽</b>" in b500, b500
-    assert "Комиссия Playerok:</b> 10%" in text
-    assert _num("12,5") == 12.5 and _num("45 ₽") == 45 and _num("-3") is None and _num("abc") is None
+    b1, b2 = text.split("🔑")[1], text.split("🔑")[2]
+    assert "0.05$ с продажи" in b1
+    assert "1 день: 2 шт → <b>0.1$</b>" in b1, b1
+    assert "7 дней: 3 шт → <b>0.15$</b>" in b1, b1
+    assert "30 дней: 4 шт → <b>0.2$</b>" in b1, b1
+    assert "30 дней: 4 шт → <b>20 ₽</b>" in b2, b2
+    assert "омисси" not in text
+    assert parse_money("0.05$") == (0.05, "$") and parse_money("$0,05") == (0.05, "$")
+    assert parse_money("5₽") == (5, "₽") and parse_money("5 руб") == (5, "₽") and parse_money("0.05") == (0.05, "$")
+    assert parse_money("abc") is None and parse_money("-1$") is None
+    # кнопки калькулятора не пересекаются с другими экранами
+    root = pathlib.Path(__file__).resolve().parents[1] / "bot"
+    others = "".join(p.read_text() for p in root.rglob("*.py") if p.name != "stats.py")
+    assert not re.search(r'"pc[:"]', others)
     print("OK")
 asyncio.run(main())
-
-# кнопки калькулятора не пересекаются с другими экранами (раньше «pf» перехватывал профиль)
-import re, pathlib
-root = pathlib.Path(__file__).resolve().parents[1] / "bot"
-others = "".join(p.read_text() for p in root.rglob("*.py") if p.name != "stats.py")
-assert not re.search(r'"pc[:"]', others), "префикс pc занят другим экраном"
-print("OK")

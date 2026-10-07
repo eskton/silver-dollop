@@ -185,7 +185,6 @@ async def build_report(session: AsyncSession, tg_id: int, now: datetime | None =
 
 # ===================== калькулятор прибыли =====================
 
-PROFIT_FEE_KEY = "profit_fee_pct"
 PROFIT_PERIODS = ((1, "1 день"), (7, "7 дней"), (30, "30 дней"))
 
 
@@ -195,19 +194,16 @@ def _norm(text: str | None) -> str:
     return norm_lot(text)
 
 
-def money2(value: float) -> str:
-    sign = "−" if value < 0 else ""
-    return sign + f"{abs(value):,.2f}".replace(",", " ").replace(".00", "") + " ₽"
+def amount(value: float, currency: str) -> str:
+    text = f"{value:,.4f}".rstrip("0").rstrip(".").replace(",", " ")
+    return f"{text}$" if currency == "$" else f"{text} {currency}"
 
 
-def profit_for(
-    deals: list[DealState], keyword: str, cost: float, fee_pct: float, days: int, now: datetime
-) -> tuple[int, float, float]:
-    """(продано шт., выручка, прибыль) по лотам, в названии которых есть keyword.
-    Прибыль = выручка − комиссия Playerok − себестоимость × количество."""
+def sales_count(deals: list[DealState], keyword: str, days: int, now: datetime) -> int:
+    """Сколько продаж за `days` дней у лотов, в названии которых есть keyword (целыми словами)."""
     kw = _norm(keyword)
     since = now - timedelta(days=days)
-    count, revenue = 0, 0.0
+    count = 0
     for d in deals:
         if (d.status or "").upper() not in SALE_STATUSES:
             continue
@@ -215,44 +211,30 @@ def profit_for(
         if when is None or when < since:
             continue
         # целыми словами: «100 робуксов» не должно цеплять «2100 робуксов»
-        if not kw or f" {kw} " not in f" {_norm(d.item_name)} ":
-            continue
-        count += 1
-        revenue += d.price or 0.0
-    profit = revenue * (1 - fee_pct / 100) - cost * count
-    return count, revenue, profit
-
-
-async def get_fee(session: AsyncSession, tg_id: int) -> float:
-    from .features import get_setting
-
-    try:
-        return float(await get_setting(session, tg_id, PROFIT_FEE_KEY, "0"))
-    except ValueError:
-        return 0.0
+        if kw and f" {kw} " in f" {_norm(d.item_name)} ":
+            count += 1
+    return count
 
 
 async def profit_report(session: AsyncSession, tg_id: int, now: datetime | None = None) -> str:
     now = now or datetime.utcnow()
     rules = list(await session.scalars(select(ProfitRule).where(ProfitRule.seller_tg_id == tg_id)))
-    fee = await get_fee(session, tg_id)
     lines = [
         "🧮 <b>Калькулятор прибыли</b>",
         "",
-        "Бот находит продажи, в названии лота которых есть ключевое слово, и считает: "
-        "выручка − комиссия Playerok − себестоимость × количество.",
-        f"<b>Комиссия Playerok:</b> {fee:g}%",
+        "Чистая прибыль = продано штук × твоя прибыль с одной продажи.",
         "",
     ]
     if not rules:
-        lines.append("Ключевых слов пока нет — нажми «➕ Добавить слово».")
+        lines.append("Пока пусто — нажми «➕ Добавить товар».")
         return "\n".join(lines)
     deals = list(await session.scalars(select(DealState).where(DealState.seller_tg_id == tg_id)))
     for r in rules:
-        lines.append(f"🔑 <b>{html.escape(r.keyword)}</b> — себестоимость {money2(r.cost)}/шт")
+        cur = r.currency or "$"
+        lines.append(f"🔑 <b>{html.escape(r.keyword)}</b> — {amount(r.cost, cur)} с продажи")
         for days, title in PROFIT_PERIODS:
-            n, revenue, profit = profit_for(deals, r.keyword, r.cost, fee, days, now)
-            lines.append(f"   {title}: {n} шт · выручка {money2(revenue)} · прибыль <b>{money2(profit)}</b>")
+            n = sales_count(deals, r.keyword, days, now)
+            lines.append(f"   {title}: {n} шт → <b>{amount(n * r.cost, cur)}</b>")
         lines.append("")
     lines.append("<i>Считаются заказы, которые видел бот. Для полной истории — «📥 Загрузить историю с Playerok».</i>")
     return "\n".join(lines)

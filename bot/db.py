@@ -202,14 +202,15 @@ class StarsOrder(Base):
 
 
 class ProfitRule(Base):
-    """Калькулятор прибыли: ключевое слово из названия лота и себестоимость 1 шт."""
+    """Калькулятор прибыли: ключевое слово из названия лота и чистая прибыль с 1 продажи."""
 
     __tablename__ = "profit_rules"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
     keyword: Mapped[str] = mapped_column(String(255))
-    cost: Mapped[float] = mapped_column(Float, default=0.0)
+    cost: Mapped[float] = mapped_column(Float, default=0.0)  # чистая прибыль с 1 шт
+    currency: Mapped[str | None] = mapped_column(String(8), default="$")
 
 
 class GiftcardMap(Base):
