@@ -114,7 +114,7 @@ asyncio.run(main())
 async def nominal():
     lots = [
         {"id": "a", "slug": "a", "name": "✅ДЛЯ РФ✅100 РОБУКСОВ ПО КОДУ", "price": 120, "obtainingType": {"id": "code"}},
-        {"id": "b", "slug": "b", "name": "100 робуксов промокод", "price": 104, "obtainingType": {"id": "code"}},
+        {"id": "b", "slug": "b", "name": "100 робуксов промокод", "price": 104, "rawPrice": 94, "obtainingType": {"id": "code"}},
         {"id": "c", "slug": "c", "name": "500 робуксов", "price": 520, "obtainingType": {"id": "code"}},
         {"id": "d", "slug": "d", "name": "100 робуксов по нику", "price": 50, "obtainingType": {"id": "nick"}},
         {"id": "e", "slug": "e", "name": "Робуксы любые", "price": 10, "obtainingType": {"id": "code"}},
@@ -124,14 +124,20 @@ async def nominal():
         if op == "item":
             assert v["slug"] == "my-lot"
             return RawResponse(200, json.dumps({"data": {"item": {"id": "m", "name": "x", "category": {"id": "cat"},
+                               "price": 110, "rawPrice": 100,
                                "obtainingType": {"id": "code", "name": "Промокод"}}}}), None)
         if op == "items":
             assert v["filter"]["obtainingTypeId"] == "code"
             return RawResponse(200, json.dumps({"data": {"items": {"edges": [{"node": n} for n in lots], "pageInfo": {}}}}), None)
         raise AssertionError(op)
-    text = await pricing.nominal_report(PlayerokClient("T", transport=t), "https://playerok.com/products/my-lot", 104)
+    costs = pricing.parse_costs("100 0.5\n500=5,5$")
+    assert costs == {100: 0.5, 500: 5.5}
+    text = await pricing.nominal_report(PlayerokClient("T", transport=t), "https://playerok.com/products/my-lot", 104, costs=costs)
     print(text)
-    assert "<b>100</b>: 104 ₽ ÷ 104 = <b>1.0000</b>" in text and "<b>500</b>: 520 ₽ ÷ 104 = <b>5.0000</b>" in text
+    # 100: продавец получает rawPrice 94 ₽ → $0.90, закупка 0.5 → +$0.40 ✅
+    assert "<b>100</b> · мин. 104 ₽ (продавцу 94 ₽) → <b>$0.90</b>" in text and "прибыль <b>$+0.40</b> (+81%) ✅" in text, text
+    # 500: rawPrice нет → по доле своего лота 100/110: 520×0.909=472.7 ₽ → $4.55, закупка 5.5 → минус ❌
+    assert "(продавцу ≈472.73 ₽) → <b>$4.55</b>" in text and "прибыль <b>$-0.95</b>" in text and "❌" in text, text
     assert "по нику" not in text and "любые" not in text
     print("OK")
 asyncio.run(nominal())

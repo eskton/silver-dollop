@@ -25,10 +25,12 @@ router = Router(name="pricing")
 class NominalInput(StatesGroup):
     link = State()
     divisor = State()
+    costs = State()
 
 
 NOMINAL_LINK_KEY = "nominal_lot_ref"
 NOMINAL_DIV_KEY = "nominal_divisor"
+NOMINAL_COSTS_KEY = "nominal_costs"
 
 
 class AddPriceRule(StatesGroup):
@@ -81,7 +83,7 @@ async def render_dumping(
         [_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")],
         [_btn(f"⏱ Проверять раз в {interval} мин", f"f:{feature.key}:p:dumping_interval_min")],
         [_btn("➕ Добавить лот", "dp:add"), _btn("▶️ Проверить сейчас", "dp:run")],
-        [_btn("📋 Цены по номиналам", "dp:nom")],
+        [_btn("🧮 Выгода по рынку (номиналы)", "dp:nom")],
     ]
     rows += [[_btn(f"🗑 {r.lot_key[:30]}", f"dp:del:{r.id}")] for r in rules]
     rows.append([_btn("‹ Назад", "st")])
@@ -208,18 +210,20 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
             divisor = float(await ft.get_setting(session, user.id, NOMINAL_DIV_KEY, "104"))
         except ValueError:
             divisor = 104.0
+        costs = pricing.parse_costs(await ft.get_setting(session, user.id, NOMINAL_COSTS_KEY, ""))
     if not seller.is_connected:
         await message.answer("Аккаунт Playerok не подключён.")
         return
     await message.answer("🔎 Собираю цены, это до минуты…")
     try:
         async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
-            text = await pricing.nominal_report(client, ref, divisor or 104.0)
+            text = await pricing.nominal_report(client, ref, divisor or 104.0, costs=costs)
     except (AuthRequired, PlayerokError) as e:
         text = f"⚠️ Playerok: <code>{html.escape(str(e))[:300]}</code>"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [_btn("🔄 Обновить", "dp:nomrun")],
-        [_btn(f"➗ Делитель: {divisor:g}", "dp:nomdiv"), _btn("🔗 Другая категория", "dp:nomlink")],
+        [_btn("💵 Закупка", "dp:nomcost"), _btn(f"➗ Курс: {divisor:g}", "dp:nomdiv")],
+        [_btn("🔗 Другая категория", "dp:nomlink")],
     ])
     await message.answer(text[:4000], reply_markup=kb)
 
@@ -267,11 +271,40 @@ async def nominal_save_link(message: Message, state: FSMContext, sessions: Sessi
     await _nominal(message, sessions, cipher, message.from_user)
 
 
+@router.callback_query(F.data == "dp:nomcost")
+async def nominal_ask_costs(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        cur = await ft.get_setting(session, cb.from_user.id, NOMINAL_COSTS_KEY, "")
+    await state.set_state(NominalInput.costs)
+    await cb.answer()
+    await cb.message.answer(
+        "Пришли закупочную цену в $ для каждого номинала, по строке: номинал и цена.\n"
+        "Например:\n<code>50 0.48\n100 0.95\n500 4.6</code>"
+        + (f"\n\nСейчас:\n<code>{html.escape(cur)}</code>" if cur else ""),
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.message(NominalInput.costs, F.text, ~F.text.func(is_cancel))
+async def nominal_save_costs(message: Message, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    costs = pricing.parse_costs(message.text)
+    if not costs:
+        await message.answer("Не понял. Формат: <code>100 0.95</code> — по строке на номинал.")
+        return
+    await state.clear()
+    text = "\n".join(f"{n} {c:g}" for n, c in sorted(costs.items()))
+    async with sessions() as session:
+        await ft.set_setting(session, message.from_user.id, NOMINAL_COSTS_KEY, text)
+        seller = await get_or_create_seller(session, message.from_user)
+    await message.answer(f"✅ Закупка сохранена ({len(costs)} номиналов).", reply_markup=main_menu(seller.is_connected))
+    await _nominal(message, sessions, cipher, message.from_user)
+
+
 @router.callback_query(F.data == "dp:nomdiv")
 async def nominal_ask_div(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(NominalInput.divisor)
     await cb.answer()
-    await cb.message.answer("На какое число делить цену? Например <code>104</code>:", reply_markup=cancel_kb())
+    await cb.message.answer("Курс: на сколько делить цену в ₽, чтобы получить $. Например <code>104</code>:", reply_markup=cancel_kb())
 
 
 @router.message(NominalInput.divisor, F.text, ~F.text.func(is_cancel))
