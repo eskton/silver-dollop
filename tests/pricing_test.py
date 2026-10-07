@@ -118,6 +118,7 @@ async def nominal():
         {"id": "c", "slug": "c", "name": "500 робуксов", "price": 520, "obtainingType": {"id": "code"}},
         {"id": "d", "slug": "d", "name": "100 робуксов по нику", "price": 50, "obtainingType": {"id": "nick"}},
         {"id": "e", "slug": "e", "name": "Робуксы любые", "price": 10, "obtainingType": {"id": "code"}},
+        {"id": "f", "slug": "f", "name": "100 робуксов (мой)", "price": 60, "obtainingType": {"id": "code"}, "user": {"id": "me"}},
     ]
     async def t(body, token):
         op, v = body["operationName"], body["variables"]
@@ -132,12 +133,24 @@ async def nominal():
         raise AssertionError(op)
     costs = pricing.parse_costs("100 0.5\n500=5,5$")
     assert costs == {100: 0.5, 500: 5.5}
-    text = await pricing.nominal_report(PlayerokClient("T", transport=t), "https://playerok.com/products/my-lot", 104, costs=costs)
+    text = await pricing.nominal_report(PlayerokClient("T", transport=t), "https://playerok.com/products/my-lot", 104,
+                                        costs=costs, own_user_id="me")
     print(text)
-    # 100: продавец получает rawPrice 94 ₽ → $0.90, закупка 0.5 → +$0.40 ✅
-    assert "<b>100</b> · мин. 104 ₽ (продавцу 94 ₽) → <b>$0.90</b>" in text and "прибыль <b>$+0.40</b> (+81%) ✅" in text, text
-    # 500: rawPrice нет → по доле своего лота 100/110: 520×0.909=472.7 ₽ → $4.55, закупка 5.5 → минус ❌
-    assert "(продавцу ≈472.73 ₽) → <b>$4.55</b>" in text and "прибыль <b>$-0.95</b>" in text and "❌" in text, text
+    # 100: свой лот за 60 ₽ не считается; чужой самый дешёвый 104 ₽ ÷ 104 = $1.00, закупка 0.5 → +$0.50 ✅
+    assert "<b>100</b> · 104 ₽ ÷ 104 = <b>$1.00</b>" in text and "прибыль <b>$+0.50</b> (+100%) ✅" in text, text
+    # 500: 520 ₽ ÷ 104 = $5.00, закупка 5.5 → минус ❌
+    assert "<b>500</b> · 520 ₽ ÷ 104 = <b>$5.00</b>" in text and "прибыль <b>$-0.50</b>" in text and "❌" in text, text
+    assert "мой" not in text
     assert "по нику" not in text and "любые" not in text
+
+    # лимит «Too many requests»: ждём и повторяем, а не падаем
+    calls = {"n": 0}
+    async def limited(body, token):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return RawResponse(200, json.dumps({"errors": [{"message": "Too many requests, please try again later"}]}), None)
+        return RawResponse(200, json.dumps({"data": {"item": {"id": "x", "name": "x"}}}), None)
+    it = await PlayerokClient("T", transport=limited).get_item("x")
+    assert it.id == "x" and calls["n"] == 2
     print("OK")
 asyncio.run(nominal())

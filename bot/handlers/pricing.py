@@ -214,10 +214,11 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
     if not seller.is_connected:
         await message.answer("Аккаунт Playerok не подключён.")
         return
-    await message.answer("🔎 Собираю цены, это до минуты…")
+    await message.answer("🔎 Собираю цены. Playerok разрешает ~15 запросов в минуту, поэтому это 1–2 минуты…")
     try:
         async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
-            text = await pricing.nominal_report(client, ref, divisor or 104.0, costs=costs)
+            text = await pricing.nominal_report(client, ref, divisor or 104.0, costs=costs,
+                                                own_user_id=seller.playerok_id)
     except (AuthRequired, PlayerokError) as e:
         text = f"⚠️ Playerok: <code>{html.escape(str(e))[:300]}</code>"
     kb = InlineKeyboardMarkup(inline_keyboard=[

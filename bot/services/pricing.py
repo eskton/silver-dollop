@@ -200,12 +200,13 @@ def parse_costs(text: str) -> dict[int, float]:
 
 
 async def nominal_report(
-    client: PlayerokClient, lot_ref: str, divisor: float, pages: int = 20,
-    costs: dict[int, float] | None = None,
+    client: PlayerokClient, lot_ref: str, divisor: float, pages: int = 8,
+    costs: dict[int, float] | None = None, own_user_id: str | None = None,
 ) -> str:
     """Калькулятор выгоды по рынку: для каждого номинала в категории (и способе получения)
-    лота lot_ref — самый дешёвый конкурент, сколько из его цены получает продавец,
-    ÷ divisor (курс), минус закупка → прибыль с продажи."""
+    лота lot_ref — самый дешёвый ЧУЖОЙ лот (свои исключены), его цена для покупателя
+    ÷ divisor, минус закупка → прибыль с продажи. pages по 24 лота — Playerok ограничивает
+    частоту запросов, поэтому немного."""
     costs = costs or {}
     ref = lot_ref.strip()
     slug = ref.split("/products/", 1)[1].split("?")[0].strip("/") if "/products/" in ref else ref
@@ -216,6 +217,7 @@ async def nominal_report(
                                        obtaining_type_id=item.obtaining_type_id or None)
     if item.obtaining_type_id:
         lots = [o for o in lots if not o.obtaining_type_id or o.obtaining_type_id == item.obtaining_type_id]
+    lots = [o for o in lots if not own_user_id or o.user_id != own_user_id]  # только чужие
     best: dict[int, Item] = {}
     for o in lots:
         n = nominal_of(o.name)
@@ -223,31 +225,19 @@ async def nominal_report(
             continue
         if n not in best or o.price < best[n].price:
             best[n] = o
-    # Доля, которую получает продавец (без комиссии площадки): по rawPrice самого лота,
-    # иначе по своему лоту из ссылки.
-    own_share = (item.raw_price / item.price) if (item.raw_price and item.price) else None
     way = f" · {html.escape(item.obtaining_type_name)}" if item.obtaining_type_name else ""
     lines = [
         f"🧮 <b>Выгода по рынку</b>{way}",
-        f"просмотрено лотов: {len(lots)}, курс ÷{divisor:g}",
-        "<i>мин. цена конкурента → получит продавец после комиссии → ÷ курс → минус закупка</i>",
+        f"чужих лотов просмотрено: {len(lots)}, курс ÷{divisor:g}",
+        "<i>самая низкая цена конкурента ÷ курс − закупка = прибыль с продажи</i>",
         "",
     ]
     if not best:
-        lines.append("Не нашёл лотов с номиналом в названии.")
+        lines.append("Не нашёл чужих лотов с номиналом в названии.")
     for n in sorted(best):
         o = best[n]
-        if o.raw_price and 0 < o.raw_price <= o.price:
-            net, approx = float(o.raw_price), ""
-        elif own_share:
-            net, approx = o.price * own_share, "≈"
-        else:
-            net, approx = float(o.price), "≈"
-        usd = net / divisor
-        line = (
-            f"<b>{n}</b> · мин. {_rub(o.price)} (продавцу {approx}{_rub(net)}) → <b>${usd:.2f}</b> — "
-            f'<a href="{o.url}">лот</a>'
-        )
+        usd = o.price / divisor
+        line = f"<b>{n}</b> · {_rub(o.price)} ÷ {divisor:g} = <b>${usd:.2f}</b> — " f'<a href="{o.url}">лот</a>'
         cost = costs.get(n)
         if cost is not None:
             profit = usd - cost

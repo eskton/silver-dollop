@@ -251,6 +251,38 @@ HEADERS = {
 }
 
 
+# ----- ограничение частоты запросов -----
+# Playerok отвечает «Too many requests» примерно после 15 запросов в минуту с аккаунта.
+# Один общий лимит на токен для всех функций бота (опрос, лоты, цены, отчёты).
+RPM_LIMIT = int(os.getenv("PLAYEROK_RPM", "12") or 12)
+_RATE: dict[str, Any] = {}  # токен → (lock, deque времени запросов)
+TOO_MANY_RE = re.compile(r"too many requests|rate limit", re.I)
+RATE_RETRY_DELAYS = (15, 30, 45)
+
+
+async def _rate_wait(token: str | None) -> None:
+    """Ждёт, если за последнюю минуту с этого токена уже RPM_LIMIT запросов."""
+    import asyncio
+    import collections
+    import time
+
+    if RPM_LIMIT <= 0:
+        return
+    key = token or ""
+    if key not in _RATE:
+        _RATE[key] = (asyncio.Lock(), collections.deque())
+    lock, stamps = _RATE[key]
+    async with lock:
+        while True:
+            now = time.monotonic()
+            while stamps and now - stamps[0] >= 60:
+                stamps.popleft()
+            if len(stamps) < RPM_LIMIT:
+                stamps.append(now)
+                return
+            await asyncio.sleep(60 - (now - stamps[0]) + 0.05)
+
+
 class PaidPlacementRefused(PlayerokError):
     """Бесплатного тарифа нет, а платное восстановление выключено продавцом."""
 
@@ -344,6 +376,10 @@ class PlayerokClient:
 
     # ----- низкий уровень -----
 
+    def _real_transport(self) -> bool:
+        """Лимит частоты — только для настоящих запросов к сайту (в тестах транспорт подменён)."""
+        return self._transport is None and type(self)._curl_post is _ORIGINAL_CURL_POST
+
     async def _gql(
         self,
         operation: str,
@@ -361,6 +397,8 @@ class PlayerokClient:
             query = PATCHED_QUERIES.get(operation, query)
             body = {"operationName": operation, "query": query, "variables": variables or {}}
         send = self._transport or self._curl_post
+        if self._real_transport():
+            await _rate_wait(self._token)
         try:
             resp = await send(body, self._token)
         except Exception as e:  # сеть, таймаут, TLS
@@ -370,6 +408,26 @@ class PlayerokClient:
             payload = json.loads(resp.text)
         except ValueError:
             payload = None
+        # «Too many requests»: запрос не выполнен — безопасно подождать и повторить.
+        limited = resp.status == 429 or (
+            isinstance(payload, dict)
+            and any(TOO_MANY_RE.search(str((e or {}).get("message", ""))) for e in (payload.get("errors") or [])
+                    if isinstance(e, dict))
+        )
+        if limited:
+            attempt = getattr(self, "_rate_attempt", 0)
+            if attempt < len(RATE_RETRY_DELAYS):
+                import asyncio
+
+                delay = RATE_RETRY_DELAYS[attempt] if self._real_transport() else 0
+                log.warning("Playerok %s: слишком много запросов — жду %s с и повторяю", operation, delay)
+                self._rate_attempt = attempt + 1
+                try:
+                    await asyncio.sleep(delay)
+                    return await self._gql(operation, query, variables, _retries=_retries)
+                finally:
+                    self._rate_attempt = attempt
+            raise PlayerokError("Playerok: слишком много запросов, попробуй через пару минут")
         if not isinstance(payload, dict):
             # HTML вместо JSON — это страница защиты от ботов, а не истёкшая сессия.
             snippet = " ".join(resp.text.split())[:300]
@@ -612,6 +670,8 @@ class PlayerokClient:
         Ошибки — только PlayerokError: сессию по REST-ответу не сбрасываем."""
         body = {"operationName": "rest:" + path, "rest": path, "variables": {}}
         send = self._transport or self._curl_post
+        if self._real_transport():
+            await _rate_wait(self._token)
         try:
             resp = await send(body, self._token)
         except Exception as e:
@@ -742,3 +802,6 @@ class PlayerokClient:
             q.CREATE_CHAT_MESSAGE,
             {"input": {"chatId": chat_id, "text": text}},
         )
+
+
+_ORIGINAL_CURL_POST = PlayerokClient._curl_post
