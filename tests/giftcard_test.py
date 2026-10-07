@@ -300,6 +300,37 @@ async def main():
         assert await gc.get_api_key(s, tg) == ""
     assert "fc_FROM_BOT_KEY_123" not in LOG.getvalue()
     print("12. ключ из бота: зашифрован в базе, работает без переменной Railway, удаляется")
+
+    # 13. заказ пришёл, пока плагин был выключен → кнопка «Выдать по оплаченным заказам»
+    async with sessions() as s:
+        await gc.set_api_key(s, tg, "fc_FROM_BOT_KEY_123")
+        await ft.set_setting(s, tg, gc.ENABLED_KEY, "0")
+        await s.execute(DeliveryItem.__table__.delete())  # без запаса автовыдачи
+        await s.commit()
+    DEALS.clear(); DEALS["m1"] = ["PAID", "🎁 Steam Gift Card 5$ | моментально"]
+    charges = F["charges"]
+    await poll()
+    async with sessions() as s:
+        st = await s.scalar(select(DealState).where(DealState.deal_id == "m1"))
+        st.first_seen_at = datetime.utcnow() - timedelta(minutes=1)  # заказ был раньше включения
+        await s.commit()
+        await ft.set_setting(s, tg, gc.ENABLED_KEY, "1")
+        await ft.set_setting(s, tg, gc.ENABLED_AT_KEY, datetime.utcnow().isoformat())
+    await poll()
+    async with sessions() as s:
+        assert await s.scalar(select(GiftcardOrder).where(GiftcardOrder.deal_id == "m1")) is None
+        pending = await gc.pending_paid_deals(s, tg)
+        assert [st.deal_id for st, _ in pending] == ["m1"], pending
+        assert await gc.start_manual(s, tg, "m1") == "ok"
+        assert await gc.start_manual(s, tg, "m1") != "ok"  # второй раз — нельзя
+        assert await gc.pending_paid_deals(s, tg) == []
+    await poll(); await poll()
+    async with sessions() as s:
+        o = await s.scalar(select(GiftcardOrder).where(GiftcardOrder.deal_id == "m1"))
+    assert o.status == "DELIVERED" and F["charges"] == charges + 1, (o.status, F["charges"])
+    assert any(c == "c-m1" and "Ваш код" in t for c, t in CHAT)
+    assert "m1" in CONFIRMED
+    print("13. заказ до включения → «Выдать по оплаченным» → куплено один раз, выдано, подтверждено")
     print("OK")
 
 asyncio.run(main())

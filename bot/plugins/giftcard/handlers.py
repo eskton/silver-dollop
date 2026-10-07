@@ -106,6 +106,7 @@ async def render(sessions: SessionFactory, tg: int) -> tuple[str, InlineKeyboard
         [_btn("🔑 Ввести API-ключ", "gc:key")] + ([_btn("🗑 Удалить ключ", "gc:keydel")] if has_key else []),
     ]
     rows += [[_btn(f"🗑 {m.lot_key[:30]}", f"gc:del:{m.id}")] for m in maps]
+    rows.append([_btn("🎁 Выдать по оплаченным заказам", "gc:paid")])
     rows.append([_btn("🧪 Тест (без покупки)", "gc:test")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -453,6 +454,49 @@ async def retry(cb: CallbackQuery, sessions: SessionFactory) -> None:
         )
         text = "Заказ не найден." if order is None else await gc.retry(session, order)
     await cb.answer(text, show_alert=True)
+
+
+# ----- ручная выдача -----
+
+
+@router.callback_query(F.data == "gc:paid")
+async def paid_list(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        pending = await gc.pending_paid_deals(session, cb.from_user.id)
+    await cb.answer()
+    if not pending:
+        await cb.message.answer(
+            "Нет оплаченных невыданных заказов на привязанные лоты за последние 24 ч.\n"
+            "Если заказ точно есть — проверь, что лот привязан (название должно совпадать)."
+        )
+        return
+    lines = ["<b>Оплачены, но код не выдан:</b>", ""]
+    kb = []
+    for st, m in pending[:10]:
+        lines.append(f"• {html.escape((st.item_name or '')[:50])} — {html.escape(st.buyer or 'покупатель')}")
+        kb.append([_btn(f"🎁 Выдать: {(st.buyer or 'покупатель')[:20]} · {(st.item_name or '')[:20]}",
+                        f"gc:give:{st.deal_id}"[:64])])
+    lines += ["", "Нажми — бот купит карту у FazerCards и отправит код покупателю в чат (≤30 с), "
+              "затем отметит заказ выполненным."]
+    await cb.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+
+@router.callback_query(F.data.startswith("gc:give:"))
+async def paid_give(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    deal_id = cb.data.split(":", 2)[2]
+    async with sessions() as session:
+        if not await gc.get_api_key(session, cb.from_user.id):
+            await cb.answer("Сначала введи API-ключ", show_alert=True)
+            return
+        result = await gc.start_manual(session, cb.from_user.id, deal_id)
+    if result != "ok":
+        await cb.answer(result, show_alert=True)
+        return
+    await cb.answer("Покупаю и выдаю — придёт уведомление", show_alert=True)
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 # ----- тест без покупки -----

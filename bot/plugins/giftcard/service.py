@@ -29,7 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crypto import TokenCipher
-from ...db import GiftcardMap, GiftcardOrder, Seller
+from ...db import DealState, GiftcardMap, GiftcardOrder, Seller
 from ...logs import tag
 from ...playerok import Deal, PlayerokClient, PlayerokError
 from ...services import features as ft
@@ -167,6 +167,69 @@ async def find_mapping(session: AsyncSession, tg: int, deal: Deal) -> GiftcardMa
             if best is None or len(k) > best[0]:
                 best = (len(k), m)
     return best[1] if best else None
+
+
+# ----- ручная выдача по уже оплаченным заказам -----
+
+MANUAL_WINDOW = timedelta(hours=24)
+
+
+def _deal_like(st: DealState):
+    """Объект с полями, которые нужны find_mapping, из сохранённой сделки."""
+    from types import SimpleNamespace
+
+    url = st.item_url or ""
+    slug = url.split("/products/", 1)[1].strip("/") if "/products/" in url else ""
+    return SimpleNamespace(item_name=st.item_name or "", item_id=st.item_id or "", item_slug=slug)
+
+
+async def pending_paid_deals(session: AsyncSession, tg: int) -> list[tuple[DealState, GiftcardMap]]:
+    """Оплаченные (PAID) заказы за 24 ч на привязанные лоты, по которым Gift Card ещё
+    не покупалась — например, пришли, пока плагин был выключен."""
+    since = _now() - MANUAL_WINDOW
+    states = list(await session.scalars(
+        select(DealState).where(
+            DealState.seller_tg_id == tg,
+            DealState.status == "PAID",
+            DealState.first_seen_at >= since,
+        ).order_by(DealState.first_seen_at.desc())
+    ))
+    taken = set(await session.scalars(
+        select(GiftcardOrder.deal_id).where(GiftcardOrder.seller_tg_id == tg)
+    ))
+    result = []
+    for st in states:
+        if st.deal_id in taken or st.delivered:
+            continue
+        mapping = await find_mapping(session, tg, _deal_like(st))
+        if mapping is not None:
+            result.append((st, mapping))
+    return result
+
+
+async def start_manual(session: AsyncSession, tg: int, deal_id: str) -> str:
+    """Ставит заказ в работу вручную: создаёт строку PROCESSING — ближайший опрос
+    (≤30 с) купит карту с тем же защитным Idempotency-Key и выдаст код."""
+    for st, mapping in await pending_paid_deals(session, tg):
+        if st.deal_id != deal_id:
+            continue
+        session.add(GiftcardOrder(
+            seller_tg_id=tg,
+            deal_id=st.deal_id,
+            chat_id=st.chat_id,
+            item_name=(st.item_name or "")[:255],
+            buyer=(st.buyer or "")[:64],
+            category_id=mapping.category_id,
+            card_id=mapping.card_id,
+            quantity=mapping.quantity or 1,
+            idem_key=f"playerok-{tg}-{st.deal_id}",
+            status="PROCESSING",
+            updated_at=_now(),
+        ))
+        await session.commit()
+        log.info("%s GIFTCARD ORDER_RECEIVED (вручную) сделка %s «%s»", tag(tg), st.deal_id, st.item_name)
+        return "ok"
+    return "Заказ уже в работе, выдан или больше не оплачен."
 
 
 # ----- основной вход из automation._process_deal -----
