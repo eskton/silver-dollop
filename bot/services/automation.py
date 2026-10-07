@@ -545,8 +545,10 @@ async def process_items(
     tg = seller.tg_id
     async with sessions() as session:
         bump_on = await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["bump"])
-        relist_on = await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["relist"])
-        if not (bump_on or relist_on):
+        # Перевыставление здесь больше НЕ делаем: в списке лотов со статусом SOLD лежат и
+        # продажи полугодовой давности — бот выставлял их все. Выставление идёт только
+        # сразу после новой продажи (relist_after_sale) и вручную кнопками.
+        if not bump_on:
             return
         if await _last_action(session, tg, "items_check") and _now() - (
             await _last_action(session, tg, "items_check")
@@ -597,25 +599,6 @@ async def process_items(
                 session.add(ActionLog(seller_tg_id=tg, kind="bump", target=item.id, cost=real_cost))
                 await session.commit()
                 await notify(bot, session, tg, "system", f"🚀 Поднял лот «{html.escape(item.name)}».")
-
-        if relist_on:
-            interval = timedelta(hours=await ft.get_param(session, tg, "relist_interval_hours"))
-            candidates = await relist_candidates(session, tg, items)
-            for item in candidates:
-                last = await _last_action(session, tg, "relist", item.id)
-                if last and now - last < interval:
-                    continue
-                try:
-                    await client.publish_item(item.id, price=item.price, allow_paid=await ft.get_flag(
-                        session, tg, "relist_paid_allowed", False))
-                except PlayerokError as e:
-                    log.warning("%s перевыставление (по списку) лота %s: %s", tag(tg), item.id, e)
-                    continue
-                session.add(ActionLog(seller_tg_id=tg, kind="relist", target=item.id))
-                await session.commit()
-                await notify(
-                    bot, session, tg, "relisted", f"🔁 Выставил заново лот «{html.escape(item.name)}»."
-                )
 
 
 _LOGGED: set[tuple[int, str, str]] = set()
@@ -703,7 +686,7 @@ async def relist_after_sale(
     tg = seller.tg_id
     state.relisted = True
     try:
-        await client.publish_item(
+        published_id = await client.publish_item(
             deal.item_id,
             price=deal.price if isinstance(deal.price, (int, float)) else None,
             allow_paid=await ft.get_flag(session, tg, "relist_paid_allowed", False),
@@ -724,7 +707,8 @@ async def relist_after_sale(
         )
         return
     state.relist_note = "ok"
-    session.add(ActionLog(seller_tg_id=tg, kind="relist", target=deal.item_id))
+    # ID выставленного лота (а не из сделки) — по нему «🧹 Снять» сможет его снять
+    session.add(ActionLog(seller_tg_id=tg, kind="relist", target=published_id or deal.item_id))
     log.info("%s перевыставление: лот %s выставлен заново (сделка %s)", tag(tg), deal.item_id, deal.id)
     await notify(
         bot, session, tg, "relisted",

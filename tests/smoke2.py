@@ -134,7 +134,8 @@ async def main():
     assert "KEY-AAA" in SENT_TO_CHAT[1]
     assert STATE["confirmed"] == [{"id": "d1", "status": "SENT"}]
     assert any("Автоподтверждение" in t for t in bot.sent) and any("Осталось: 1" in t for t in bot.sent)
-    assert STATE["increaseItemPriorityStatus"] == ["i1"] and STATE["publishItem"] == ["i2"]
+    # старый SOLD-лот из списка больше не выставляется массово
+    assert STATE["increaseItemPriorityStatus"] == ["i1"] and "publishItem" not in STATE, STATE
     n = len(SENT_TO_CHAT)
 
     # Круг 2: ничего нового — ничего не шлём

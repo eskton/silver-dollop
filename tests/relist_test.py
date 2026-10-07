@@ -56,10 +56,14 @@ async def main():
         cand = await relist_candidates(s, 1, items)
     assert [i.id for i in cand] == ["i1","i2"], [i.id for i in cand]
 
-    # авто-восстановление по интервалу (0ч)
+    # старые проданные лоты из списка НЕ выставляются массово (раньше бот выставлял
+    # продажи полугодовой давности) — только после новой продажи или вручную
     bot = Bot()
+    async with sessions() as s:
+        await ft.set_setting(s, 1, "bump_enabled", "1")
+        await ft.set_setting(s, 1, "bump_daily_limit", "0")
     await process_items(bot, sessions, seller, PlayerokClient("T"))
-    assert MODE["published"] == ["i1","i2"], MODE["published"]
+    assert MODE["published"] == [], MODE["published"]
 
     # items падает "auth" — продавец НЕ разлогинивается (sync_seller проходит без AuthRequired наружу)
     MODE["items_fail"]="auth"; MODE["published"].clear()

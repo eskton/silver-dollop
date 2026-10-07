@@ -635,6 +635,10 @@ class PlayerokClient:
             msg = " ".join(resp.text.split())[:200] or "пустой ответ"
         raise PlayerokError(f"HTTP {resp.status}: {msg}")
 
+    async def discontinue_item(self, item_id: str) -> None:
+        """Снять лот с продажи (REST /item/{id}/discontinue, как PlayerokAPI.items.discontinue)."""
+        await self._rest_post(f"/rest-api/public/item/{item_id}/discontinue")
+
     async def republish_item(self, item_id: str) -> None:
         """«Выставить снова» проданный/снятый лот — так делает кнопка на сайте
         (REST /item/{id}/republish, как в библиотеке PlayerokAPI)."""

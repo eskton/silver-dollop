@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta
 import html
 
 from aiogram import F, Router
@@ -662,7 +663,6 @@ async def render_relist(
         enabled = await ft.is_enabled(session, tg, feature)
         all_lots = await ft.get_flag(session, tg, "relist_all", True)
         paid_ok = await ft.get_flag(session, tg, "relist_paid_allowed", False)
-        interval = await ft.get_param(session, tg, "relist_interval_hours")
         rules = list(await session.scalars(select(RelistRule).where(RelistRule.seller_tg_id == tg)))
         toggle_rows = await _toggle_rows(session, tg, feature)
         sold = await relist_after_sale_overview(session, tg)
@@ -673,7 +673,6 @@ async def render_relist(
         "",
         f"<b>Статус:</b> {_status(enabled)}",
         f"<b>Режим:</b> {'все проданные лоты' if all_lots else 'только по правилам'}",
-        f"<b>Интервал:</b> {interval} ч." if interval else "<b>Интервал:</b> сразу",
         f"<b>Платное восстановление:</b> {'🟢 разрешено' if paid_ok else '🔴 запрещено (только бесплатные статусы)'}",
         f"<b>Правил отбора:</b> {len(rules)}",
     ]
@@ -689,7 +688,6 @@ async def render_relist(
         lines.append("пока продаж не было")
     lines += ["", feature.note]
     rows = [[_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")]]
-    rows.append([_btn(f"⏱ Интервал: {interval} ч.", f"f:{feature.key}:p:relist_interval_hours")])
     rows += toggle_rows
     rows.append([_btn("➕ Добавить правило (слово/ссылка)", "rl:add")])
     rows += [[_btn(f"🗑 {r.pattern[:30]}", f"rl:del:{r.id}")] for r in rules]
@@ -699,6 +697,7 @@ async def render_relist(
             seen.add(st.item_id)
             rows.append([_btn(f"🔄 {(st.item_name or 'Лот')[:28]}", f"rl:pub:{st.item_id}")])
     rows.append([_btn("👁 Показать и восстановить вручную", "rl:preview")])
+    rows.append([_btn("🧹 Снять лоты, выставленные ботом за 24 ч", "rl:undo")])
     rows.append([_btn("‹ Назад", "st")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -795,7 +794,7 @@ async def _restore(
     try:
         url = (known.item_url or "") if known is not None else ""
         slug = url.split("/products/", 1)[1] if "/products/" in url else None
-        await client.publish_item(
+        published_id = await client.publish_item(
             item_id, price=known.price if known is not None else None, allow_paid=allow_paid,
             slug=slug if slug and slug != item_id else None,
             sold_name=(known.item_name if known is not None else None) if after_sale else None,
@@ -804,7 +803,7 @@ async def _restore(
     except (AuthRequired, PlayerokError) as e:
         return f"❌ {html.escape(name)}: {html.escape(str(e))[:600]}"
     async with sessions() as session:
-        session.add(ActionLog(seller_tg_id=tg, kind="relist", target=item_id))
+        session.add(ActionLog(seller_tg_id=tg, kind="relist", target=published_id or item_id))
         # продажи с этим лотом считаем обработанными — автоматом второй раз не выставлять
         await session.execute(
             update(DealState)
@@ -855,6 +854,74 @@ async def relist_all(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenC
         for item in candidates[:30]:
             results.append(await _restore(client, sessions, seller.tg_id, item.id, item.name))
     await cb.message.answer("\n".join(results))
+
+
+@router.callback_query(F.data == "rl:undo")
+async def relist_undo_ask(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    from ..db import ActionLog
+
+    since = datetime.utcnow() - timedelta(hours=24)
+    async with sessions() as session:
+        n = len(set(await session.scalars(
+            select(ActionLog.target).where(
+                ActionLog.seller_tg_id == cb.from_user.id, ActionLog.kind == "relist", ActionLog.created_at >= since
+            )
+        )))
+    if not n:
+        await cb.answer("За последние 24 ч бот ничего не выставлял", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [_btn(f"✅ Да, снять {n} шт.", "rl:undook")], [_btn("‹ Отмена", "f:relist")],
+    ])
+    await _show(cb, f"Снять с продажи лоты, которые бот выставил за последние 24 ч ({n} шт.)?\n"
+                    "Они перестанут продаваться; вернуть можно вручную на сайте.", kb)
+
+
+@router.callback_query(F.data == "rl:undook")
+async def relist_undo(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    from ..db import ActionLog
+
+    seller = await _seller(sessions, cb)
+    if not seller.is_connected:
+        await cb.answer("Аккаунт не подключён", show_alert=True)
+        return
+    since = datetime.utcnow() - timedelta(hours=24)
+    async with sessions() as session:
+        targets = list(dict.fromkeys(await session.scalars(
+            select(ActionLog.target).where(
+                ActionLog.seller_tg_id == cb.from_user.id, ActionLog.kind == "relist", ActionLog.created_at >= since
+            )
+        )))
+    await cb.answer("Снимаю…")
+    done, failed = [], []
+    async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+        for item_id in targets[:100]:
+            try:
+                item = await client.get_item(item_id)
+                name = item.name
+            except (AuthRequired, PlayerokError):
+                item, name = None, item_id[:8]
+            if item is not None and item.status.upper() not in ("APPROVED", "PENDING_APPROVAL", "PENDING_MODERATION"):
+                continue  # уже не в продаже (продан/снят) — не трогаем
+            try:
+                await client.discontinue_item(item_id)
+                done.append(name)
+            except (AuthRequired, PlayerokError) as e:
+                failed.append(f"{name}: {str(e)[:80]}")
+    async with sessions() as session:
+        # чтобы повторное нажатие не трогало их снова
+        await session.execute(
+            delete(ActionLog).where(
+                ActionLog.seller_tg_id == cb.from_user.id, ActionLog.kind == "relist", ActionLog.created_at >= since,
+                ActionLog.target.in_([t for t in targets])
+            )
+        )
+        await session.commit()
+    lines = [f"🧹 Снято с продажи: {len(done)}"]
+    lines += [f"• {html.escape(n[:50])}" for n in done[:30]]
+    if failed:
+        lines += ["", f"❌ Не получилось ({len(failed)}):"] + [f"• {html.escape(f)}" for f in failed[:15]]
+    await cb.message.answer("\n".join(lines)[:4000])
 
 
 @router.callback_query(F.data.startswith("rl:pub:"))
