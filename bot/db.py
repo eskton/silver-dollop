@@ -201,6 +201,17 @@ class StarsOrder(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class ProfitRule(Base):
+    """Калькулятор прибыли: ключевое слово из названия лота и себестоимость 1 шт."""
+
+    __tablename__ = "profit_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    keyword: Mapped[str] = mapped_column(String(255))
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+
+
 class GiftcardMap(Base):
     """Плагин Gift Card: лот Playerok → товар FazerCards (категория + номинал)."""
 
