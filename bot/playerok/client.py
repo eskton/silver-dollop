@@ -111,6 +111,8 @@ class Item:
     may_be_published: bool | None = None
     category_id: str = ""
     user_id: str = ""
+    obtaining_type_id: str = ""  # способ получения (код, по нику, …)
+    obtaining_type_name: str = ""
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> "Item":
@@ -128,6 +130,8 @@ class Item:
             may_be_published=_get(raw, "mayBePublished"),
             category_id=str(_get(raw, "category", "id", default="") or ""),
             user_id=str(_get(raw, "user", "id", default="") or ""),
+            obtaining_type_id=str(_get(raw, "obtainingType", "id", default="") or ""),
+            obtaining_type_name=str(_get(raw, "obtainingType", "name", default="") or ""),
         )
 
     @property
@@ -518,17 +522,23 @@ class PlayerokClient:
                 break
         return result
 
-    async def category_items(self, category_id: str, pages: int = 5) -> list[Item]:
-        """Лоты всех продавцов в категории (как PlayerokAPI.get_items), только APPROVED."""
+    async def category_items(
+        self, category_id: str, pages: int = 5, obtaining_type_id: str | None = None
+    ) -> list[Item]:
+        """Лоты всех продавцов в категории (как PlayerokAPI.get_items), только APPROVED.
+        obtaining_type_id — только с этим способом получения (код / по нику и т.п.)."""
         result: list[Item] = []
         after: str | None = None
+        filt: dict[str, Any] = {"gameCategoryId": category_id, "status": ["APPROVED"]}
+        if obtaining_type_id:
+            filt["obtainingTypeId"] = obtaining_type_id
         for _ in range(pages):
             data = await self._gql(
                 "items",
                 "persisted:" + PERSISTED_QUERIES["items"],
                 {
                     "pagination": {"first": 24, "after": after},
-                    "filter": {"gameCategoryId": category_id, "status": ["APPROVED"]},
+                    "filter": filt,
                 },
             )
             edges = _get(data, "items", "edges", default=[]) or []

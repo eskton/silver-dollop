@@ -88,16 +88,19 @@ async def check_rule(
         return "Playerok не отдал цену лота", False
     if not item.category_id:
         return "Playerok не отдал категорию лота", False
-    others = await client.category_items(item.category_id)
+    # Только тот же способ получения: «робуксы кодом» не сравниваем с «по нику».
+    others = await client.category_items(item.category_id, obtaining_type_id=item.obtaining_type_id or None)
     rivals = [
         o for o in others
         if o.id != item.id
+        and (not item.obtaining_type_id or not o.obtaining_type_id or o.obtaining_type_id == item.obtaining_type_id)
         and o.user_id != (seller.playerok_id or "")
         and isinstance(o.price, (int, float)) and o.price > 0
         and kw_match(rule.competitor_kw, o.name)
     ]
+    way = f" ({item.obtaining_type_name})" if item.obtaining_type_name else ""
     if not rivals:
-        return f"конкурентов «{rule.competitor_kw}» не найдено, цена {_rub(price)}", False
+        return f"конкурентов «{rule.competitor_kw}»{way} не найдено, цена {_rub(price)}", False
     best = min(rivals, key=lambda o: o.price)
     at_min = best.price - rule.step < rule.min_price
     target = max(best.price - rule.step, rule.min_price)

@@ -11,7 +11,8 @@ from bot.services.sellers import get_or_create_seller
 
 # мой лот: для покупателя 110 ₽, мне 100 ₽ (комиссия ×1.1)
 MINE = {"id": "my1", "slug": "my-100", "name": "💰 100 РОБУКСОВ | ПРОМОКОД", "price": 110, "rawPrice": 100,
-        "status": "APPROVED", "category": {"id": "cat-robux"}, "user": {"id": "me"}}
+        "status": "APPROVED", "category": {"id": "cat-robux"}, "user": {"id": "me"},
+        "obtainingType": {"id": "ot-code", "name": "Промокод"}}
 RIVALS = []
 UPDATES = []
 IGNORE = {"on": False}
@@ -21,8 +22,8 @@ async def pk(body, token):
         f = v["filter"]
         if f.get("userId") == "me":
             return RawResponse(200, json.dumps({"data": {"items": {"edges": [{"node": MINE}], "pageInfo": {}}}}), None)
-        assert f == {"gameCategoryId": "cat-robux", "status": ["APPROVED"]}, f
-        edges = [{"node": n} for n in RIVALS + [MINE]]
+        assert f == {"gameCategoryId": "cat-robux", "status": ["APPROVED"], "obtainingTypeId": "ot-code"}, f
+        edges = [{"node": n} for n in RIVALS + [MINE]]  # сервер мог и не отфильтровать — проверяем сами
         return RawResponse(200, json.dumps({"data": {"items": {"edges": edges, "pageInfo": {}}}}), None)
     if op == "item":
         return RawResponse(200, json.dumps({"data": {"item": MINE}}), None)
@@ -34,8 +35,9 @@ async def pk(body, token):
         return RawResponse(200, json.dumps({"data": {"updateItem": {"id": "my1"}}}), None)
     raise AssertionError(op)
 
-def rival(i, name, price, user="u2"):
-    return {"id": f"r{i}", "name": name, "price": price, "status": "APPROVED", "user": {"id": user}}
+def rival(i, name, price, user="u2", way="ot-code"):
+    return {"id": f"r{i}", "name": name, "price": price, "status": "APPROVED", "user": {"id": user},
+            "obtainingType": {"id": way}}
 
 class Bot:
     def __init__(self): self.sent = []
@@ -55,7 +57,8 @@ async def main():
     bot = Bot()
 
     # 1. конкурент 105 ₽ (и чужой 1000 робуксов за 50 ₽ — не тот товар), свой дешёвый лот не считаем
-    RIVALS[:] = [rival(1, "100 Робуксов промокод", 105), rival(2, "1000 робуксов", 50), rival(3, "100 робуксов", 90, user="me")]
+    RIVALS[:] = [rival(1, "100 Робуксов промокод", 105), rival(2, "1000 робуксов", 50), rival(3, "100 робуксов", 90, user="me"),
+                 rival(4, "100 РОБУКСОВ СРАЗУ НА БАЛАНС ПО НИКУ", 70, way="ot-nick")]  # другой способ получения
     res = await pricing.run(bot, sessions, seller, client)
     assert UPDATES == [{"id": "my1", "price": 94}], UPDATES          # цель 104 ₽ / 1.1 = 94.5 → 94
     assert res[0][2] and "снизил" in res[0][1] and any("📉" in t for t in bot.sent)

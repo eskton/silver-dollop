@@ -35,7 +35,7 @@ Telegram-бот — помощник продавцов на playerok.com (ан�
 - `services/pricing.py` + `handlers/pricing.py` — «📉 Снижение цен» (функция `dumping`):
   `PriceRule` (свой лот, ключевые слова конкурентов, шаг ₽, минимум ₽ для покупателя);
   раз в N мин: `item` → категория → `category_items` (items c gameCategoryId) → самая
-  низкая чужая цена − шаг → `updateItem {id, price: rawPrice}` (как PlayerokAPI.update_item;
+  низкая чужая цена (тот же способ получения — фильтр obtainingTypeId) − шаг → `updateItem {id, price: rawPrice}` (как PlayerokAPI.update_item;
   input.price = цена продавца, пересчёт по price/rawPrice). Только снижает. Вживую не проверено;
   неизвестно, уходит ли лот на модерацию после смены цены.
 - `services/analytics.py`, `services/history.py` — аналитика и импорт истории продаж.
