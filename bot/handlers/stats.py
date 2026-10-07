@@ -23,7 +23,7 @@ router = Router(name="stats")
 REFRESH_KB = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="stats:refresh")],
-        [InlineKeyboardButton(text="🧮 Калькулятор прибыли", callback_data="pf")],
+        [InlineKeyboardButton(text="🧮 Калькулятор прибыли", callback_data="pc")],
         [InlineKeyboardButton(text="📥 Загрузить историю с Playerok", callback_data="stats:import")],
     ]
 )
@@ -105,15 +105,15 @@ async def _profit_screen(sessions: SessionFactory, tg: int) -> tuple[str, Inline
         rules = list(await session.scalars(select(ProfitRule).where(ProfitRule.seller_tg_id == tg)))
     btn = InlineKeyboardButton
     rows = [
-        [btn(text="➕ Добавить слово", callback_data="pf:add"), btn(text="🔄 Пересчитать", callback_data="pf")],
-        [btn(text="💸 Комиссия Playerok, %", callback_data="pf:fee")],
+        [btn(text="➕ Добавить слово", callback_data="pc:add"), btn(text="🔄 Пересчитать", callback_data="pc")],
+        [btn(text="💸 Комиссия Playerok, %", callback_data="pc:fee")],
     ]
-    rows += [[btn(text=f"🗑 {r.keyword[:30]}", callback_data=f"pf:del:{r.id}")] for r in rules]
+    rows += [[btn(text=f"🗑 {r.keyword[:30]}", callback_data=f"pc:del:{r.id}")] for r in rules]
     rows.append([btn(text="‹ К аналитике", callback_data="stats:refresh")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.callback_query(F.data == "pf")
+@router.callback_query(F.data == "pc")
 async def profit_show(cb: CallbackQuery, sessions: SessionFactory) -> None:
     text, kb = await _profit_screen(sessions, cb.from_user.id)
     try:
@@ -123,7 +123,7 @@ async def profit_show(cb: CallbackQuery, sessions: SessionFactory) -> None:
     await cb.answer()
 
 
-@router.callback_query(F.data == "pf:add")
+@router.callback_query(F.data == "pc:add")
 async def profit_add(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ProfitInput.keyword)
     await cb.answer()
@@ -158,7 +158,7 @@ async def profit_cost(message: Message, state: FSMContext, sessions: SessionFact
     await message.answer(text, reply_markup=kb)
 
 
-@router.callback_query(F.data == "pf:fee")
+@router.callback_query(F.data == "pc:fee")
 async def profit_fee_ask(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(ProfitInput.fee)
     await cb.answer()
@@ -183,7 +183,7 @@ async def profit_fee_save(message: Message, state: FSMContext, sessions: Session
     await message.answer(text, reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith("pf:del:"))
+@router.callback_query(F.data.startswith("pc:del:"))
 async def profit_del(cb: CallbackQuery, sessions: SessionFactory) -> None:
     rule_id = int(cb.data.split(":")[2])
     async with sessions() as session:

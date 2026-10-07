@@ -43,3 +43,10 @@ async def main():
     assert _num("12,5") == 12.5 and _num("45 ₽") == 45 and _num("-3") is None and _num("abc") is None
     print("OK")
 asyncio.run(main())
+
+# кнопки калькулятора не пересекаются с другими экранами (раньше «pf» перехватывал профиль)
+import re, pathlib
+root = pathlib.Path(__file__).resolve().parents[1] / "bot"
+others = "".join(p.read_text() for p in root.rglob("*.py") if p.name != "stats.py")
+assert not re.search(r'"pc[:"]', others), "префикс pc занят другим экраном"
+print("OK")
