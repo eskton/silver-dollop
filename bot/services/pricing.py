@@ -70,6 +70,11 @@ def _rub(v: float) -> str:
     return f"{v:,.2f}".rstrip("0").rstrip(".").replace(",", " ") + " ₽"
 
 
+def _who(o: Item) -> str:
+    """Какой лот конкурента взят для сравнения — чтобы продавец мог проверить."""
+    return f"«{o.name[:40]}» {o.url}"
+
+
 async def check_rule(
     client: PlayerokClient, seller: Seller, rule: PriceRule, my_items: list[Item]
 ) -> tuple[str, bool]:
@@ -98,15 +103,27 @@ async def check_rule(
     target = max(best.price - rule.step, rule.min_price)
     if price <= target:
         why = f"на минимуме {_rub(rule.min_price)}" if at_min else "дешевле всех"
-        return f"{why}: моя {_rub(price)}, у конкурента {_rub(best.price)}", False
+        return f"{why}: моя {_rub(price)}, у конкурента {_rub(best.price)} — {_who(best)}", False
     k = price / raw  # множитель комиссии площадки
     new_raw = math.floor(target / k)
     new_raw = max(new_raw, math.ceil(rule.min_price / k) if rule.min_price else 1)
     if new_raw >= raw:
         why = f"на минимуме {_rub(rule.min_price)}" if at_min else "снижать некуда"
-        return f"{why}: моя {_rub(price)}, у конкурента {_rub(best.price)}", False
-    await client.update_item_price(item.id, new_raw)
-    return f"снизил {_rub(price)} → ≈{_rub(new_raw * k)} (конкурент {_rub(best.price)})", True
+        return f"{why}: моя {_rub(price)}, у конкурента {_rub(best.price)} — {_who(best)}", False
+    answer = await client.update_item_price(item.id, new_raw)
+    # Проверяем, что Playerok действительно поменял цену, а не просто ответил «ок».
+    after = await client.get_item(item.id)
+    status = str(answer.get("status") or after.status or "")
+    if not isinstance(after.price, (int, float)) or after.price >= price:
+        return (
+            f"Playerok принял запрос, но цена не изменилась: {_rub(price)} "
+            f"(статус {status or '?'}, ответ rawPrice={answer.get('rawPrice')}, price={answer.get('price')}). "
+            f"Конкурент {_rub(best.price)} — {_who(best)}"
+        ), False
+    note = f"снизил {_rub(price)} → {_rub(after.price)} (конкурент {_rub(best.price)} — {_who(best)})"
+    if status and status.upper() not in ("APPROVED", "ACTIVE"):
+        note += f"; статус лота: {status}"
+    return note, True
 
 
 async def run(
@@ -141,8 +158,8 @@ async def run(
             except AuthRequired:
                 raise
             except PlayerokError as e:
-                note, changed = f"ошибка: {e}"[:250], False
-            rule.last_note = note[:255]
+                note, changed = f"ошибка: {e}"[:500], False
+            rule.last_note = note[:600]
             rule.last_run = now
             results.append((rule, note, changed))
             log.info("%s снижение цен «%s»: %s", tag(tg), rule.lot_key[:60], note)

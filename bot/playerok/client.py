@@ -539,10 +539,11 @@ class PlayerokClient:
                 break
         return result
 
-    async def update_item_price(self, item_id: str, raw_price: int) -> None:
+    async def update_item_price(self, item_id: str, raw_price: int) -> dict[str, Any]:
         """Новая цена лота. Как в PlayerokAPI.update_item: input.price — цена продавца
-        (rawPrice, без комиссии площадки)."""
-        await self._gql("updateItem", q.UPDATE_ITEM, {"input": {"id": item_id, "price": int(raw_price)}})
+        (rawPrice, без комиссии площадки). Возвращает лот из ответа (price, rawPrice, status)."""
+        data = await self._gql("updateItem", q.UPDATE_ITEM, {"input": {"id": item_id, "price": int(raw_price)}})
+        return _get(data, "updateItem") or {}
 
     async def find_sold_item(self, user_id: str, name: str) -> Item | None:
         """Проданный лот по названию. Так делает Playerok Universal: ID лота в сделке —

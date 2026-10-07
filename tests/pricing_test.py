@@ -14,6 +14,7 @@ MINE = {"id": "my1", "slug": "my-100", "name": "💰 100 РОБУКСОВ | ПР
         "status": "APPROVED", "category": {"id": "cat-robux"}, "user": {"id": "me"}}
 RIVALS = []
 UPDATES = []
+IGNORE = {"on": False}
 async def pk(body, token):
     op, v = body["operationName"], body["variables"]
     if op == "items":
@@ -27,6 +28,8 @@ async def pk(body, token):
         return RawResponse(200, json.dumps({"data": {"item": MINE}}), None)
     if op == "updateItem":
         UPDATES.append(v["input"])
+        if IGNORE["on"]:  # Playerok ответил «ок», но цену не поменял
+            return RawResponse(200, json.dumps({"data": {"updateItem": {"id": "my1", "status": "PENDING_MODERATION"}}}), None)
         MINE["rawPrice"] = v["input"]["price"]; MINE["price"] = round(v["input"]["price"] * 1.1, 2)
         return RawResponse(200, json.dumps({"data": {"updateItem": {"id": "my1"}}}), None)
     raise AssertionError(op)
@@ -56,6 +59,7 @@ async def main():
     res = await pricing.run(bot, sessions, seller, client)
     assert UPDATES == [{"id": "my1", "price": 94}], UPDATES          # цель 104 ₽ / 1.1 = 94.5 → 94
     assert res[0][2] and "снизил" in res[0][1] and any("📉" in t for t in bot.sent)
+    assert "playerok.com/products/" in res[0][1] and "100 Робуксов промокод" in res[0][1]  # видно, с кем сравнили
     print("1. дешевле конкурента на шаг:", res[0][1])
 
     # 2. интервал: повторно сразу не проверяет
@@ -73,6 +77,15 @@ async def main():
     res = await pricing.run(bot, sessions, seller, client, force=True)
     assert len(UPDATES) == 2 and "минимум" in res[0][1], res
     print("4. не ниже минимума:", res[0][1])
+
+    # 4b. Playerok ответил «ок», но цена не изменилась — не врём, что снизили
+    MINE.update(price=158, rawPrice=144)
+    RIVALS[:] = [rival(9, "100 Робуксов", 140)]
+    IGNORE["on"] = True
+    res = await pricing.run(bot, sessions, seller, client, force=True)
+    IGNORE["on"] = False
+    assert not res[0][2] and "цена не изменилась" in res[0][1] and "PENDING_MODERATION" in res[0][1], res[0][1]
+    print("4b. цена не поменялась — честное сообщение:", res[0][1][:120])
 
     # 5. нет конкурентов / лот не найден — понятные пометки
     RIVALS[:] = []

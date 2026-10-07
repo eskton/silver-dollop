@@ -212,7 +212,7 @@ class PriceRule(Base):
     competitor_kw: Mapped[str] = mapped_column(String(255))  # какие чужие лоты сравнивать
     step: Mapped[float] = mapped_column(Float, default=1.0)  # на сколько ₽ дешевле
     min_price: Mapped[float] = mapped_column(Float, default=0.0)  # ниже не опускать (цена для покупателя)
-    last_note: Mapped[str | None] = mapped_column(String(255))
+    last_note: Mapped[str | None] = mapped_column(String(600))
     last_run: Mapped[datetime | None] = mapped_column(DateTime)
 
 
