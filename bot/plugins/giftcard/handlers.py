@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, select
 
-from ...db import GiftcardMap, GiftcardOrder, SessionFactory
+from ...db import DealState, GiftcardMap, GiftcardOrder, SessionFactory
 from ...keyboards import cancel_kb, is_cancel, main_menu
 from ...services import features as ft
 from ...services.sellers import get_or_create_seller
@@ -100,7 +100,7 @@ async def render(sessions: SessionFactory, tg: int) -> tuple[str, InlineKeyboard
     ] or ["пока нет — добавь кнопкой ниже"]
     rows = [
         [_btn("🔴 Выключить" if enabled else "🟢 Включить", "gc:t")],
-        [_btn("🔌 Проверить API", "gc:check"), _btn("📦 Заказы", "gc:orders")],
+        [_btn("🔌 Проверить API", "gc:check"), _btn("📦 История заказов", "gc:orders")],
         [_btn("📋 Каталог", "gc:cats"), _btn("💳 Номиналы категории", "gc:offers")],
         [_btn("➕ Привязать лот", "gc:add")],
         [_btn("🔑 Ввести API-ключ", "gc:key")] + ([_btn("🗑 Удалить ключ", "gc:keydel")] if has_key else []),
@@ -420,29 +420,66 @@ async def del_map(cb: CallbackQuery, sessions: SessionFactory) -> None:
 # ----- заказы -----
 
 
+def _usd(value: float | None, exact: bool | None) -> str:
+    if value is None:
+        return "—"
+    return f"{'' if exact else '≈'}${value:,.2f}".replace(",", " ")
+
+
 @router.callback_query(F.data == "gc:orders")
 async def orders(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    tg = cb.from_user.id
     async with sessions() as session:
         rows = list(await session.scalars(
-            select(GiftcardOrder).where(GiftcardOrder.seller_tg_id == cb.from_user.id)
-            .order_by(GiftcardOrder.id.desc()).limit(15)
+            select(GiftcardOrder).where(GiftcardOrder.seller_tg_id == tg)
+            .order_by(GiftcardOrder.id.desc()).limit(20)
         ))
+        prices = dict((await session.execute(
+            select(DealState.deal_id, DealState.price).where(
+                DealState.seller_tg_id == tg, DealState.deal_id.in_([o.deal_id for o in rows])
+            )
+        )).all()) if rows else {}
+        tz = timedelta(hours=await ft.get_tz(session, tg))
+        all_done = list(await session.scalars(
+            select(GiftcardOrder).where(GiftcardOrder.seller_tg_id == tg, GiftcardOrder.status == "DELIVERED")
+        ))
+        all_prices = dict((await session.execute(
+            select(DealState.deal_id, DealState.price).where(
+                DealState.seller_tg_id == tg, DealState.deal_id.in_([o.deal_id for o in all_done])
+            )
+        )).all()) if all_done else {}
     await cb.answer()
     if not rows:
         await cb.message.answer("Заказов Gift Card пока не было.")
         return
-    lines = ["<b>Последние заказы Gift Card:</b>", ""]
+    lines = ["<b>📦 История заказов Gift Card</b>", ""]
     kb: list[list[InlineKeyboardButton]] = []
     for o in rows:
-        line = f"• {html.escape(o.item_name[:40])} — {html.escape(o.buyer or '—')}: {STATUS_RU.get(o.status, o.status)}"
-        if o.provider_order_id:
-            line += f" ({html.escape(o.provider_order_id)})"
+        when = (o.created_at + tz).strftime("%d.%m %H:%M") if o.created_at else "—"
+        sale = prices.get(o.deal_id)
+        lines.append(
+            f"<b>{when}</b> · {html.escape(o.item_name[:40])}\n"
+            f"   👤 {html.escape(o.buyer or '—')} · {STATUS_RU.get(o.status, o.status)}\n"
+            f"   💰 продано: {f'{sale:g} ₽' if isinstance(sale, (int, float)) else '—'} · "
+            f"🛒 куплено: {_usd(o.cost_usd, o.cost_exact)}"
+            + (f" · {html.escape(o.provider_order_id)}" if o.provider_order_id else "")
+        )
         if o.error and o.status != "DELIVERED":
-            line += f"\n   <i>{html.escape(o.error[:200])}</i>"
-        lines.append(line)
+            lines.append(f"   <i>{html.escape(o.error[:200])}</i>")
         if o.status in ("FAILED", "UNKNOWN") or (o.status == "NEEDS_CHECK" and o.codes_enc):
             kb.append([_btn(f"🔁 Повторить: {o.item_name[:25]}", f"gc:retry:{o.id}")])
-    await cb.message.answer("\n".join(lines)[:4000], reply_markup=InlineKeyboardMarkup(inline_keyboard=kb) if kb else None)
+    spent = sum(o.cost_usd or 0 for o in all_done)
+    sold = sum(v or 0 for v in all_prices.values())
+    approx = any(o.cost_usd is not None and not o.cost_exact for o in all_done)
+    lines += [
+        "",
+        f"<b>Итого выдано:</b> {len(all_done)} шт · продано на {sold:g} ₽ · "
+        f"куплено за {'≈' if approx else ''}${spent:,.2f}".replace(",", " "),
+        "<i>≈ — цена номинала из каталога FazerCards на момент выдачи (в ответе заказа суммы не было).</i>"
+        if approx else "",
+    ]
+    await cb.message.answer("\n".join(lines).strip()[:4000],
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb) if kb else None)
 
 
 @router.callback_query(F.data.startswith("gc:retry:"))

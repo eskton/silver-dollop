@@ -248,6 +248,8 @@ class GiftcardOrder(Base):
     provider_order_id: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), default="PROCESSING")
     codes_enc: Mapped[str | None] = mapped_column(Text)  # коды, зашифрованные SECRET_KEY
+    cost_usd: Mapped[float | None] = mapped_column(Float)  # за сколько куплено у поставщика
+    cost_exact: Mapped[bool | None] = mapped_column(Boolean)  # True — из ответа заказа, False — по каталогу
     error: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     buyer_told: Mapped[bool | None] = mapped_column(Boolean, default=False)

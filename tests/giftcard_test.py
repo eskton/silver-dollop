@@ -152,7 +152,7 @@ async def main():
     assert [c for c, t in CHAT if "STOCK-CODE" in t] == ["c-d0"], CHAT
     assert stock.used_deal_id == "d0"
     assert CONFIRMED == ["d0", "d1"] and st.delivered, CONFIRMED
-    assert F["headers"][-1]["Idempotency-Key"] == f"playerok-{tg}-d1"
+    assert [h["Idempotency-Key"] for h in F["headers"] if "Idempotency-Key" in h][-1] == f"playerok-{tg}-d1"
     print("1. заказ → покупка → код покупателю → заказ отмечен выполненным; повторных покупок нет")
 
     # 2. перезапуск в PROCESSING: строка есть, покупка повторяется с тем же ключом → второй карты нет
@@ -331,6 +331,23 @@ async def main():
     assert any(c == "c-m1" and "Ваш код" in t for c, t in CHAT)
     assert "m1" in CONFIRMED
     print("13. заказ до включения → «Выдать по оплаченным» → куплено один раз, выдано, подтверждено")
+
+    # 14. история: цена покупки (из каталога, «≈», если в заказе нет суммы) и цена продажи
+    assert o.cost_usd == 5.1 and o.cost_exact is False, (o.cost_usd, o.cost_exact)
+    assert gc.extract_cost({"price_usd": "4.75"}) == 4.75 and gc.extract_cost({"cards": []}) is None
+    out = []
+    class Msg:
+        async def answer(self, text, reply_markup=None, **k): out.append(text)
+    class Cb:
+        data = "gc:orders"; from_user = SimpleNamespace(id=tg); message = Msg()
+        async def answer(self, *a, **k): pass
+    from bot.plugins.giftcard import handlers as gh2
+    await gh2.orders(Cb(), sessions)
+    hist = out[-1]
+    assert "История заказов" in hist and "продано: 500 ₽" in hist and "куплено: ≈$5.10" in hist, hist
+    assert "Итого выдано:" in hist and "≈ — цена номинала" in hist
+    assert "GIFT-" not in hist and "LATE-CODE" not in hist  # коды в истории не светим
+    print("14. история заказов: дата, покупатель, продано ₽, куплено $, итоги")
     print("OK")
 
 asyncio.run(main())

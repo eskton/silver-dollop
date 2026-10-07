@@ -141,6 +141,25 @@ def extract_codes(order: dict[str, Any]) -> list[str]:
     return codes
 
 
+# Поля суммы заказа. Формат заказа в документации FazerCards не описан, поэтому берём
+# только явные денежные поля; нет — цена номинала из каталога (помечается «≈»).
+COST_FIELDS = ("price_usd", "total_usd", "amount_usd", "cost_usd", "total", "amount", "price", "cost", "sum")
+
+
+def extract_cost(order: dict[str, Any]) -> float | None:
+    for field in COST_FIELDS:
+        v = order.get(field)
+        if isinstance(v, dict):
+            v = v.get("usd") or v.get("amount") or v.get("value")
+        try:
+            value = float(v) if v is not None and v != "" else None
+        except (TypeError, ValueError):
+            continue
+        if value is not None and value >= 0:
+            return value
+    return None
+
+
 def order_failed(order: dict[str, Any]) -> bool:
     return str(order.get("status") or "").lower() in FAILED_ORDER_STATUSES
 
@@ -402,6 +421,9 @@ def _apply_order(order: GiftcardOrder, result: dict[str, Any]) -> bool:
         order.error = f"неизвестный формат кода: {e}"
         log.warning("%s GIFTCARD API_ERROR заказ %s: %s", tag(tg), order.provider_order_id, order.error)
         return False
+    cost = extract_cost(result)
+    if cost is not None:
+        order.cost_usd, order.cost_exact = cost, True
     if codes:
         order.codes_enc = _cipher().encrypt("\n\n".join(codes))
         order.status = "BOUGHT"
@@ -434,10 +456,26 @@ async def _deliver(
     order.updated_at = _now()
     log.info("%s GIFTCARD DELIVERY_SUCCESS сделка %s, заказ поставщика %s", tag(tg), order.deal_id,
              order.provider_order_id)
+    if order.cost_usd is None:
+        await _cost_from_catalog(session, order)
     await notify(
         bot, session, tg, "system",
         f"🎁 Gift Card выдана: «{html.escape(order.item_name)}» → {html.escape(order.buyer or 'покупатель')}.",
     )
+
+
+async def _cost_from_catalog(session: AsyncSession, order: GiftcardOrder) -> None:
+    """Цена номинала из каталога × количество — если в ответе заказа суммы не было.
+    Уже после выдачи, чтобы не задерживать покупателя; ошибки не важны."""
+    try:
+        async with make_client(await get_api_key(session, order.seller_tg_id)) as api:
+            data = await api.offers(order.category_id)
+        offer = next((o for o in data.get("offers") or [] if str(o.get("card_id")) == order.card_id), None)
+        if offer is not None:
+            order.cost_usd = float(offer.get("price_usd")) * (order.quantity or 1)
+            order.cost_exact = False
+    except (FazerError, TypeError, ValueError):
+        pass
 
 
 async def _fail(
