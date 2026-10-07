@@ -109,3 +109,29 @@ async def main():
     assert "dp:add" in btns and "dp:run" in btns and "f:dumping:t" in btns and "не найден" in text
     print("OK")
 asyncio.run(main())
+
+# ----- цены по номиналам -----
+async def nominal():
+    lots = [
+        {"id": "a", "slug": "a", "name": "✅ДЛЯ РФ✅100 РОБУКСОВ ПО КОДУ", "price": 120, "obtainingType": {"id": "code"}},
+        {"id": "b", "slug": "b", "name": "100 робуксов промокод", "price": 104, "obtainingType": {"id": "code"}},
+        {"id": "c", "slug": "c", "name": "500 робуксов", "price": 520, "obtainingType": {"id": "code"}},
+        {"id": "d", "slug": "d", "name": "100 робуксов по нику", "price": 50, "obtainingType": {"id": "nick"}},
+        {"id": "e", "slug": "e", "name": "Робуксы любые", "price": 10, "obtainingType": {"id": "code"}},
+    ]
+    async def t(body, token):
+        op, v = body["operationName"], body["variables"]
+        if op == "item":
+            assert v["slug"] == "my-lot"
+            return RawResponse(200, json.dumps({"data": {"item": {"id": "m", "name": "x", "category": {"id": "cat"},
+                               "obtainingType": {"id": "code", "name": "Промокод"}}}}), None)
+        if op == "items":
+            assert v["filter"]["obtainingTypeId"] == "code"
+            return RawResponse(200, json.dumps({"data": {"items": {"edges": [{"node": n} for n in lots], "pageInfo": {}}}}), None)
+        raise AssertionError(op)
+    text = await pricing.nominal_report(PlayerokClient("T", transport=t), "https://playerok.com/products/my-lot", 104)
+    print(text)
+    assert "<b>100</b>: 104 ₽ ÷ 104 = <b>1.0000</b>" in text and "<b>500</b>: 520 ₽ ÷ 104 = <b>5.0000</b>" in text
+    assert "по нику" not in text and "любые" not in text
+    print("OK")
+asyncio.run(nominal())

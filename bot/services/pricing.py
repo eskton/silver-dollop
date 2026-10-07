@@ -171,3 +171,48 @@ async def run(
                              f"📉 «{html.escape(rule.lot_key[:60])}»: {html.escape(note)}")
         await session.commit()
         return results
+
+
+# ===================== цены по номиналам =====================
+
+import re as _re
+
+NOMINAL_RE = _re.compile(r"(?<![\d.,])(\d{2,6})(?![\d.,])")
+
+
+def nominal_of(name: str) -> int | None:
+    """Номинал из названия: первое число 2–6 цифр («✅ДЛЯ РФ✅100 РОБУКСОВ» → 100)."""
+    m = NOMINAL_RE.search(name or "")
+    return int(m.group(1)) if m else None
+
+
+async def nominal_report(client: PlayerokClient, lot_ref: str, divisor: float, pages: int = 20) -> str:
+    """Самый дешёвый лот каждого номинала в категории (и способе получения) лота lot_ref;
+    цена / divisor."""
+    ref = lot_ref.strip()
+    slug = ref.split("/products/", 1)[1].split("?")[0].strip("/") if "/products/" in ref else ref
+    item = await client.get_item(slug=slug)
+    if not item.category_id:
+        return "Playerok не отдал категорию этого лота."
+    lots = await client.category_items(item.category_id, pages=pages,
+                                       obtaining_type_id=item.obtaining_type_id or None)
+    if item.obtaining_type_id:
+        lots = [o for o in lots if not o.obtaining_type_id or o.obtaining_type_id == item.obtaining_type_id]
+    best: dict[int, Item] = {}
+    for o in lots:
+        n = nominal_of(o.name)
+        if n is None or not isinstance(o.price, (int, float)) or o.price <= 0:
+            continue
+        if n not in best or o.price < best[n].price:
+            best[n] = o
+    way = f" · {html.escape(item.obtaining_type_name)}" if item.obtaining_type_name else ""
+    lines = [f"📋 <b>Самые дешёвые по номиналам</b>{way}", f"просмотрено лотов: {len(lots)}, делитель {divisor:g}", ""]
+    if not best:
+        lines.append("Не нашёл лотов с номиналом в названии.")
+    for n in sorted(best):
+        o = best[n]
+        lines.append(
+            f"<b>{n}</b>: {_rub(o.price)} ÷ {divisor:g} = <b>{o.price / divisor:.4f}</b> — "
+            f'<a href="{o.url}">{html.escape(o.name[:35])}</a>'
+        )
+    return "\n".join(lines)

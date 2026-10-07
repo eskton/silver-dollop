@@ -22,6 +22,15 @@ from ..services.sellers import get_or_create_seller
 router = Router(name="pricing")
 
 
+class NominalInput(StatesGroup):
+    link = State()
+    divisor = State()
+
+
+NOMINAL_LINK_KEY = "nominal_lot_ref"
+NOMINAL_DIV_KEY = "nominal_divisor"
+
+
 class AddPriceRule(StatesGroup):
     lot = State()
     competitor = State()
@@ -72,6 +81,7 @@ async def render_dumping(
         [_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")],
         [_btn(f"⏱ Проверять раз в {interval} мин", f"f:{feature.key}:p:dumping_interval_min")],
         [_btn("➕ Добавить лот", "dp:add"), _btn("▶️ Проверить сейчас", "dp:run")],
+        [_btn("📋 Цены по номиналам", "dp:nom")],
     ]
     rows += [[_btn(f"🗑 {r.lot_key[:30]}", f"dp:del:{r.id}")] for r in rules]
     rows.append([_btn("‹ Назад", "st")])
@@ -187,8 +197,99 @@ async def run_now(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCiph
     await cb.message.answer("\n".join(lines)[:4000])
 
 
-@router.message(StateFilter(AddPriceRule), F.text.func(is_cancel))
-@router.message(StateFilter(AddPriceRule), Command("cancel"))
+# ----- цены по номиналам -----
+
+
+async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCipher, user) -> None:
+    async with sessions() as session:
+        seller = await get_or_create_seller(session, user)
+        ref = await ft.get_setting(session, user.id, NOMINAL_LINK_KEY, "")
+        try:
+            divisor = float(await ft.get_setting(session, user.id, NOMINAL_DIV_KEY, "104"))
+        except ValueError:
+            divisor = 104.0
+    if not seller.is_connected:
+        await message.answer("Аккаунт Playerok не подключён.")
+        return
+    await message.answer("🔎 Собираю цены, это до минуты…")
+    try:
+        async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+            text = await pricing.nominal_report(client, ref, divisor or 104.0)
+    except (AuthRequired, PlayerokError) as e:
+        text = f"⚠️ Playerok: <code>{html.escape(str(e))[:300]}</code>"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("🔄 Обновить", "dp:nomrun")],
+        [_btn(f"➗ Делитель: {divisor:g}", "dp:nomdiv"), _btn("🔗 Другая категория", "dp:nomlink")],
+    ])
+    await message.answer(text[:4000], reply_markup=kb)
+
+
+@router.callback_query(F.data == "dp:nom")
+async def nominal_start(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    async with sessions() as session:
+        ref = await ft.get_setting(session, cb.from_user.id, NOMINAL_LINK_KEY, "")
+    await cb.answer()
+    if ref:
+        await _nominal(cb.message, sessions, cipher, cb.from_user)
+        return
+    await nominal_ask_link(cb, state)
+
+
+@router.callback_query(F.data == "dp:nomrun")
+async def nominal_refresh(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    await cb.answer("Обновляю…")
+    await _nominal(cb.message, sessions, cipher, cb.from_user)
+
+
+@router.callback_query(F.data == "dp:nomlink")
+async def nominal_ask_link(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(NominalInput.link)
+    try:
+        await cb.answer()
+    except Exception:
+        pass  # уже ответили (вызов из nominal_start)
+    await cb.message.answer(
+        "Пришли ссылку на любой лот нужной категории и способа получения "
+        "(например, свой лот «робуксы промокодом»):", reply_markup=cancel_kb()
+    )
+
+
+@router.message(NominalInput.link, F.text, ~F.text.func(is_cancel))
+async def nominal_save_link(message: Message, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    if "/products/" not in message.text:
+        await message.answer("Нужна ссылка вида https://playerok.com/products/…")
+        return
+    await state.clear()
+    async with sessions() as session:
+        await ft.set_setting(session, message.from_user.id, NOMINAL_LINK_KEY, message.text.strip()[:500])
+        seller = await get_or_create_seller(session, message.from_user)
+    await message.answer("✅ Запомнил.", reply_markup=main_menu(seller.is_connected))
+    await _nominal(message, sessions, cipher, message.from_user)
+
+
+@router.callback_query(F.data == "dp:nomdiv")
+async def nominal_ask_div(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(NominalInput.divisor)
+    await cb.answer()
+    await cb.message.answer("На какое число делить цену? Например <code>104</code>:", reply_markup=cancel_kb())
+
+
+@router.message(NominalInput.divisor, F.text, ~F.text.func(is_cancel))
+async def nominal_save_div(message: Message, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    value = _num(message.text)
+    if not value:
+        await message.answer("Нужно число больше 0, например 104.")
+        return
+    await state.clear()
+    async with sessions() as session:
+        await ft.set_setting(session, message.from_user.id, NOMINAL_DIV_KEY, f"{value:g}")
+        seller = await get_or_create_seller(session, message.from_user)
+    await message.answer(f"✅ Делитель: {value:g}", reply_markup=main_menu(seller.is_connected))
+    await _nominal(message, sessions, cipher, message.from_user)
+
+
+@router.message(StateFilter(AddPriceRule, NominalInput), F.text.func(is_cancel))
+@router.message(StateFilter(AddPriceRule, NominalInput), Command("cancel"))
 async def cancel(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
     await state.clear()
     async with sessions() as session:
