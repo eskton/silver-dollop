@@ -109,6 +109,8 @@ class Item:
     raw_price: float | None = None  # цена продавца без комиссии — по ней считаются тарифы
     priority: str = ""  # DEFAULT / PREMIUM
     may_be_published: bool | None = None
+    category_id: str = ""
+    user_id: str = ""
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> "Item":
@@ -124,6 +126,8 @@ class Item:
             raw_price=_get(raw, "rawPrice"),
             priority=str(_get(raw, "priority", default="") or ""),
             may_be_published=_get(raw, "mayBePublished"),
+            category_id=str(_get(raw, "category", "id", default="") or ""),
+            user_id=str(_get(raw, "user", "id", default="") or ""),
         )
 
     @property
@@ -513,6 +517,32 @@ class PlayerokClient:
             if not edges or not page.get("hasNextPage") or not after:
                 break
         return result
+
+    async def category_items(self, category_id: str, pages: int = 5) -> list[Item]:
+        """Лоты всех продавцов в категории (как PlayerokAPI.get_items), только APPROVED."""
+        result: list[Item] = []
+        after: str | None = None
+        for _ in range(pages):
+            data = await self._gql(
+                "items",
+                "persisted:" + PERSISTED_QUERIES["items"],
+                {
+                    "pagination": {"first": 24, "after": after},
+                    "filter": {"gameCategoryId": category_id, "status": ["APPROVED"]},
+                },
+            )
+            edges = _get(data, "items", "edges", default=[]) or []
+            result += [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+            page = _get(data, "items", "pageInfo", default={}) or {}
+            after = page.get("endCursor")
+            if not edges or not page.get("hasNextPage") or not after:
+                break
+        return result
+
+    async def update_item_price(self, item_id: str, raw_price: int) -> None:
+        """Новая цена лота. Как в PlayerokAPI.update_item: input.price — цена продавца
+        (rawPrice, без комиссии площадки)."""
+        await self._gql("updateItem", q.UPDATE_ITEM, {"input": {"id": item_id, "price": int(raw_price)}})
 
     async def find_sold_item(self, user_id: str, name: str) -> Item | None:
         """Проданный лот по названию. Так делает Playerok Universal: ID лота в сделке —

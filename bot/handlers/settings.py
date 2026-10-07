@@ -125,6 +125,10 @@ async def render_feature(
         return await render_autoresponder(sessions, seller, feature)
     if feature.special == "relist":
         return await render_relist(sessions, seller, feature)
+    if feature.special == "dumping":
+        from .pricing import render_dumping
+
+        return await render_dumping(sessions, seller, feature)
     if feature.special == "stars":
         from ..plugins.stars.handlers import render_stars
 

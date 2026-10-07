@@ -201,6 +201,21 @@ class StarsOrder(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class PriceRule(Base):
+    """Снижение цены: свой лот держится дешевле конкурентов на step ₽, но не ниже min_price."""
+
+    __tablename__ = "price_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    lot_key: Mapped[str] = mapped_column(String(255))  # название/slug своего лота
+    competitor_kw: Mapped[str] = mapped_column(String(255))  # какие чужие лоты сравнивать
+    step: Mapped[float] = mapped_column(Float, default=1.0)  # на сколько ₽ дешевле
+    min_price: Mapped[float] = mapped_column(Float, default=0.0)  # ниже не опускать (цена для покупателя)
+    last_note: Mapped[str | None] = mapped_column(String(255))
+    last_run: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class ProfitRule(Base):
     """Калькулятор прибыли: ключевое слово из названия лота и чистая прибыль с 1 продажи."""
 

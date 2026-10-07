@@ -156,3 +156,14 @@ mutation markChatAsRead($input: MarkChatAsReadInput!) {
   }
 }
 """
+
+UPDATE_ITEM = """
+mutation updateItem($input: UpdateItemInput!) {
+  updateItem(input: $input) {
+    id
+    price
+    rawPrice
+    status
+  }
+}
+"""

@@ -17,7 +17,7 @@ from ..keyboards import deal_kb, main_menu
 from ..logs import tag
 from ..playerok import AuthRequired, ChatPreview, Deal, PlayerokClient, PlayerokError
 from ..playerok.client import ACTIVE_SALE_STATUSES
-from . import automation, notifications
+from . import automation, notifications, pricing
 from .sellers import disconnect_seller
 
 log = logging.getLogger(__name__)
@@ -118,6 +118,12 @@ async def sync_seller(
 
         if notify:
             await automation.process_items(bot, sessions, seller, client)
+            try:
+                await pricing.run(bot, sessions, seller, client)
+            except AuthRequired:
+                raise
+            except PlayerokError as e:
+                log.warning("%s снижение цен: %s", tag(seller.tg_id), e)
     finally:
         if own_client:
             await client.aclose()
