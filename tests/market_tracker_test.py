@@ -66,9 +66,13 @@ async def main():
     assert "FazerCards $1.05 (в наличии 7) → прибыль <b>$+0.10</b>" in text and "✅" in text, text
     assert "FazerCards $5.3 (нет в наличии) → прибыль <b>$-0.30</b>" in text, text
     assert "10 ₽" not in text  # свой дешёвый лот не учитывается
-    btns = [b.callback_data for r in kb.inline_keyboard for b in r]
-    assert "dp:fz" in btns and "dp:fzoff" in btns and "dp:trk" in btns
-    print("2. отчёт: Playerok ÷ 104 против FazerCards, наличие видно")
+    assert [b.callback_data for r in kb.inline_keyboard for b in r] == ["dp:nomrun", "dp:nom", "pc"]
+    # экран настроек открывается сразу, все кнопки на нём
+    mtext, mkb = await hp._market_menu(sessions, tg)
+    btns = [b.callback_data for r in mkb.inline_keyboard for b in r]
+    assert btns[0] == "dp:nomrun" and "dp:fz" in btns and "dp:fzoff" in btns and "dp:trk" in btns and "dp:nomlink" in btns
+    assert "FazerCards" in mtext and "÷104" in mtext and "выключен" in mtext, mtext
+    print("2. отчёт: Playerok ÷ 104 против FazerCards; настройки — отдельным экраном")
 
     # трекер: включаем, порог $0.05 → уведомление про 100 (500 в минус и нет в наличии)
     async with sessions() as s:

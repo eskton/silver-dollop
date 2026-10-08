@@ -210,29 +210,66 @@ NOMINAL_TIMEOUT = 180  # секунд на весь отчёт
 _NOMINAL_RUNNING: set[int] = set()
 
 
-async def _nominal_kb(sessions: SessionFactory, tg: int) -> InlineKeyboardMarkup:
+async def _market_menu(sessions: SessionFactory, tg: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Экран настроек «Выгода по рынку» — открывается сразу, отчёт — кнопкой «▶️ Посчитать»."""
     from ..plugins.access import is_admin
 
     async with sessions() as session:
+        ref = await ft.get_setting(session, tg, NOMINAL_LINK_KEY, "")
         divisor = await pricing.get_divisor(session, tg)
-        fazer_name = (await ft.get_setting(session, tg, pricing.FAZER_NAME_KEY, "")
-                      or await ft.get_setting(session, tg, pricing.FAZER_CAT_KEY, ""))
+        fazer_cat = await ft.get_setting(session, tg, pricing.FAZER_CAT_KEY, "")
+        fazer_name = await ft.get_setting(session, tg, pricing.FAZER_NAME_KEY, "") or fazer_cat
+        manual = pricing.parse_costs(await ft.get_setting(session, tg, NOMINAL_COSTS_KEY, ""))
         track_on = await ft.get_setting(session, tg, pricing.TRACK_KEY, "0") == "1"
         track_min = await ft.get_setting(session, tg, pricing.TRACK_MIN_KEY, "0.01")
-    rows = [
-        [_btn("🔄 Обновить", "dp:nomrun")],
-        [_btn("💵 Закупка вручную", "dp:nomcost"), _btn(f"➗ Курс: {divisor:g}", "dp:nomdiv")],
+    admin = is_admin(tg)
+    if fazer_cat and admin:
+        cost_line = f"FazerCards — «{html.escape(fazer_name)}»" + (f" (+ вручную {len(manual)})" if manual else "")
+    elif manual:
+        cost_line = f"вручную, номиналов: {len(manual)}"
+    else:
+        cost_line = "не задана — " + ("«🎁 FazerCards» или «💵 Закупка вручную»" if admin else "«💵 Закупка вручную»")
+    lines = [
+        "🌐 <b>Выгода по рынку</b>",
+        "",
+        "Бот берёт самую низкую цену конкурентов на Playerok по каждому номиналу, делит на курс "
+        "и сравнивает с твоей закупкой" + (" (цены FazerCards)" if admin else "") + ".",
+        "",
+        f"<b>Категория:</b> {'по лоту ' + html.escape(ref[:60]) if ref else 'не задана — «🔗 Лот для категории»'}",
+        f"<b>Курс:</b> ÷{divisor:g}",
+        f"<b>Закупка:</b> {cost_line}",
+        f"<b>Трекер:</b> {'🔔 включён — раз в 30 мин, уведомлю при прибыли ≥ $' + track_min if track_on else '🔕 выключен'}",
     ]
-    if is_admin(tg):
-        rows.append([_btn(f"🎁 FazerCards: {fazer_name[:20]}" if fazer_name else "🎁 Закупка с FazerCards", "dp:fz")]
-                    + ([_btn("✖️", "dp:fzoff")] if fazer_name else []))
+    rows = [[_btn("▶️ Посчитать сейчас", "dp:nomrun")]]
+    if admin:
+        rows.append([_btn(f"🎁 FazerCards: {fazer_name[:20]}" if fazer_cat else "🎁 Закупка с FazerCards", "dp:fz")]
+                    + ([_btn("✖️", "dp:fzoff")] if fazer_cat else []))
     rows += [
-        [_btn("🔔 Трекер: вкл" if track_on else "🔕 Трекер: выкл", "dp:trk"),
-         _btn(f"Порог: ${track_min}", "dp:trkmin")],
-        [_btn("🔗 Другая категория", "dp:nomlink")],
+        [_btn("💵 Закупка вручную", "dp:nomcost"), _btn(f"➗ Курс: {divisor:g}", "dp:nomdiv")],
+        [_btn("🔔 Трекер: вкл" if track_on else "🔕 Трекер: выкл", "dp:trk"), _btn(f"Порог: ${track_min}", "dp:trkmin")],
+        [_btn("🔗 Лот для категории", "dp:nomlink")],
         [_btn("‹ К калькулятору", "pc")],
     ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _send_menu(message: Message, sessions: SessionFactory, tg: int) -> None:
+    text, kb = await _market_menu(sessions, tg)
+    await message.answer(text, reply_markup=kb)
+
+
+async def _edit_menu(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    text, kb = await _market_menu(sessions, cb.from_user.id)
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb)
+
+
+REPORT_KB = InlineKeyboardMarkup(inline_keyboard=[
+    [_btn("🔄 Обновить", "dp:nomrun"), _btn("⚙️ Настройки", "dp:nom")],
+    [_btn("‹ К калькулятору", "pc")],
+])
 
 
 async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCipher, user) -> None:
@@ -291,23 +328,23 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
         await status.delete()
     except Exception:
         pass
-    await message.answer(text[:4000], reply_markup=await _nominal_kb(sessions, user.id))
+    await message.answer(text[:4000], reply_markup=REPORT_KB)
 
 
 @router.callback_query(F.data == "dp:nom")
-async def nominal_start(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
-    async with sessions() as session:
-        ref = await ft.get_setting(session, cb.from_user.id, NOMINAL_LINK_KEY, "")
+async def nominal_start(cb: CallbackQuery, sessions: SessionFactory) -> None:
     await cb.answer()
-    if ref:
-        await _nominal(cb.message, sessions, cipher, cb.from_user)
-        return
-    await nominal_ask_link(cb, state)
+    await _edit_menu(cb, sessions)
 
 
 @router.callback_query(F.data == "dp:nomrun")
-async def nominal_refresh(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) -> None:
-    await cb.answer("Обновляю…")
+async def nominal_refresh(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    async with sessions() as session:
+        ref = await ft.get_setting(session, cb.from_user.id, NOMINAL_LINK_KEY, "")
+    if not ref:
+        await nominal_ask_link(cb, state)
+        return
+    await cb.answer("Считаю…")
     await _nominal(cb.message, sessions, cipher, cb.from_user)
 
 
@@ -334,7 +371,7 @@ async def nominal_save_link(message: Message, state: FSMContext, sessions: Sessi
         await ft.set_setting(session, message.from_user.id, NOMINAL_LINK_KEY, message.text.strip()[:500])
         seller = await get_or_create_seller(session, message.from_user)
     await message.answer("✅ Запомнил.", reply_markup=main_menu(seller.is_connected))
-    await _nominal(message, sessions, cipher, message.from_user)
+    await _send_menu(message, sessions, message.from_user.id)
 
 
 @router.callback_query(F.data == "dp:nomcost")
@@ -363,7 +400,7 @@ async def nominal_save_costs(message: Message, state: FSMContext, sessions: Sess
         await ft.set_setting(session, message.from_user.id, NOMINAL_COSTS_KEY, text)
         seller = await get_or_create_seller(session, message.from_user)
     await message.answer(f"✅ Закупка сохранена ({len(costs)} номиналов).", reply_markup=main_menu(seller.is_connected))
-    await _nominal(message, sessions, cipher, message.from_user)
+    await _send_menu(message, sessions, message.from_user.id)
 
 
 @router.callback_query(F.data == "dp:nomdiv")
@@ -383,8 +420,8 @@ async def nominal_save_div(message: Message, state: FSMContext, sessions: Sessio
     async with sessions() as session:
         await ft.set_setting(session, message.from_user.id, NOMINAL_DIV_KEY, f"{value:g}")
         seller = await get_or_create_seller(session, message.from_user)
-    await message.answer(f"✅ Делитель: {value:g}", reply_markup=main_menu(seller.is_connected))
-    await _nominal(message, sessions, cipher, message.from_user)
+    await message.answer(f"✅ Курс: {value:g}", reply_markup=main_menu(seller.is_connected))
+    await _send_menu(message, sessions, message.from_user.id)
 
 
 # ----- закупка с FazerCards -----
@@ -452,7 +489,7 @@ async def fazer_pick(cb: CallbackQuery, state: FSMContext, sessions: SessionFact
         seller = await get_or_create_seller(session, cb.from_user)
     await cb.answer()
     await cb.message.answer(f"✅ Закупка с FazerCards: {html.escape(name)}", reply_markup=main_menu(seller.is_connected))
-    await _nominal(cb.message, sessions, cipher, cb.from_user)
+    await _send_menu(cb.message, sessions, cb.from_user.id)
 
 
 @router.callback_query(F.data == "dp:fzoff")
@@ -461,10 +498,7 @@ async def fazer_off(cb: CallbackQuery, sessions: SessionFactory) -> None:
         await ft.set_setting(session, cb.from_user.id, pricing.FAZER_CAT_KEY, "")
         await ft.set_setting(session, cb.from_user.id, pricing.FAZER_NAME_KEY, "")
     await cb.answer("FazerCards отключён — считаю по закупке вручную", show_alert=True)
-    try:
-        await cb.message.edit_reply_markup(reply_markup=await _nominal_kb(sessions, cb.from_user.id))
-    except Exception:
-        pass
+    await _edit_menu(cb, sessions)
 
 
 # ----- трекер выгодных номиналов -----
@@ -477,7 +511,7 @@ async def track_toggle(cb: CallbackQuery, sessions: SessionFactory) -> None:
         on = await ft.get_setting(session, tg, pricing.TRACK_KEY, "0") == "1"
         if not on:
             if not await ft.get_setting(session, tg, NOMINAL_LINK_KEY, ""):
-                await cb.answer("Сначала открой отчёт и пришли ссылку на лот", show_alert=True)
+                await cb.answer("Сначала «🔗 Лот для категории» — пришли ссылку на лот", show_alert=True)
                 return
             costs, _ = await pricing.load_costs(session, tg)
             if not costs:
@@ -492,10 +526,7 @@ async def track_toggle(cb: CallbackQuery, sessions: SessionFactory) -> None:
         f"🔔 Трекер включён: проверяю раз в 30 мин и пишу, когда номинал стал выгодным (прибыль ≥ ${minimum})",
         show_alert=True,
     )
-    try:
-        await cb.message.edit_reply_markup(reply_markup=await _nominal_kb(sessions, tg))
-    except Exception:
-        pass
+    await _edit_menu(cb, sessions)
 
 
 @router.callback_query(F.data == "dp:trkmin")
@@ -518,6 +549,7 @@ async def track_min_save(message: Message, state: FSMContext, sessions: SessionF
         await ft.set_setting(session, message.from_user.id, pricing.TRACK_SEEN_KEY, "")
         seller = await get_or_create_seller(session, message.from_user)
     await message.answer(f"✅ Порог трекера: ${value:g}", reply_markup=main_menu(seller.is_connected))
+    await _send_menu(message, sessions, message.from_user.id)
 
 
 @router.message(StateFilter(AddPriceRule, NominalInput), F.text.func(is_cancel))
