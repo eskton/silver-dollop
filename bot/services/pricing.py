@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 import logging
 import math
+import re as _re_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -217,9 +218,12 @@ def select_my_lots(items: list[Item], query: str) -> list[Item]:
     return exact or [it for it in items if kw_match(q, it.name)]
 
 
+MAX_DROP = 0.5  # за раз — не дешевле половины текущей цены (защита от опечаток)
+
+
 @dataclass(frozen=True)
 class Cut:
-    kind: str  # rub — на N ₽, pct — на N %, set — поставить N ₽
+    kind: str  # set — поставить N ₽, rub — снизить на N ₽, pct — снизить на N %
     value: float
 
     def target(self, price: float) -> float:
@@ -228,6 +232,15 @@ class Cut:
         if self.kind == "set":
             return self.value
         return price - self.value
+
+    def skip_reason(self, price: float) -> str | None:
+        """Почему этот лот не трогаем (None — снижаем)."""
+        target = round(self.target(price), 2)
+        if target >= price:
+            return "не дороже — не трогаю"
+        if target < price * MAX_DROP:
+            return f"не трогаю: {_rub(target)} — дешевле вдвое, похоже на опечатку"
+        return None
 
     def label(self) -> str:
         if self.kind == "pct":
@@ -238,14 +251,20 @@ class Cut:
 
 
 def parse_cut(text: str) -> Cut | None:
-    """«10» / «-10» / «10₽» — на 10 ₽, «5%» — на 5 %, «=99» — поставить 99 ₽."""
-    s = text.strip().replace(" ", "").replace(",", ".").lower().rstrip("₽рруб.")
-    kind = "rub"
-    if s.startswith("="):
-        kind, s = "set", s[1:]
-    elif s.endswith("%"):
-        kind, s = "pct", s[:-1]
-    s = s.lstrip("-−")
+    """«682» / «=682» / «до 682» — поставить 682 ₽; «-10» / «на 10» — снизить на 10 ₽;
+    «-5%» / «5%» — снизить на 5 %."""
+    s = text.strip().lower().replace(",", ".").replace("−", "-").replace("–", "-")
+    s = s.replace("руб", "").replace("₽", "").replace("р.", "").rstrip("р").replace(" ", "")
+    kind = "set"
+    if s.endswith("%"):
+        kind, s = "pct", s[:-1].lstrip("-").removeprefix("на")
+    elif s.startswith("-"):
+        kind, s = "rub", s[1:]
+    elif s.startswith("на"):
+        kind, s = "rub", s[2:].lstrip("-")
+    elif s.startswith("до"):
+        s = s[2:]
+    s = s.lstrip("=")
     try:
         v = float(s)
     except ValueError:
@@ -255,20 +274,38 @@ def parse_cut(text: str) -> Cut | None:
     return Cut(kind, v)
 
 
+_MIN_PRICE_RE = _re_mod.compile(r"minimal price\D*(\d+(?:[.,]\d+)?)", _re_mod.I)
+_AT_LEAST_RE = _re_mod.compile(r"price must be at least\D*(\d+(?:[.,]\d+)?)", _re_mod.I)
+
+
+def price_error(text: str) -> str:
+    """Ошибки Playerok о цене — по-русски."""
+    m = _MIN_PRICE_RE.search(text) or _AT_LEAST_RE.search(text)
+    if m:
+        return f"Playerok не даёт цену ниже {m.group(1)} ₽ для этого лота"
+    return f"ошибка: {text[:200]}"
+
+
 async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str, bool]:
     """Снижает цену одного своего лота. (пометка, изменили ли цену). Цены — для покупателя."""
     item = await client.get_item(item_id)
     price, raw = item.price, item.raw_price
     if not isinstance(price, (int, float)) or not isinstance(raw, (int, float)) or price <= 0 or raw <= 0:
         return "Playerok не отдал цену лота", False
+    why = cut.skip_reason(price)
+    if why:
+        return f"{_rub(price)} — {why}", False
     target = round(cut.target(price), 2)
-    if target >= price:
-        return f"уже {_rub(price)} — не дороже", False
     k = price / raw  # множитель комиссии площадки
     new_raw = max(1, math.floor(target / k + 1e-6))  # 1e-6 — от ошибок округления (99/1.1 = 89.999…)
     if new_raw >= raw:
         return f"{_rub(price)} — снижать некуда", False
-    answer = await client.update_item_price(item.id, new_raw)
+    try:
+        answer = await client.update_item_price(item.id, new_raw)
+    except AuthRequired:
+        raise
+    except PlayerokError as e:
+        return price_error(str(e)), False
     after = answer.get("price")
     if not isinstance(after, (int, float)):
         after = (await client.get_item(item.id)).price

@@ -25,6 +25,7 @@ for m in MINE.values():
 RIVALS = []
 UPDATES = []
 PRICE_IN_ANSWER = {"on": False}
+MIN_RAW = {"v": 0}
 async def pk(body, token):
     op, v = body["operationName"], body["variables"]
     if op == "items":
@@ -35,6 +36,8 @@ async def pk(body, token):
     if op == "item":
         return RawResponse(200, json.dumps({"data": {"item": MINE[v["id"]]}}), None)
     if op == "updateItem":
+        if v["input"]["price"] < MIN_RAW["v"]:
+            return RawResponse(200, json.dumps({"errors": [{"message": f"Minimal price - {MIN_RAW['v']}"}]}), None)
         UPDATES.append(v["input"])
         m = MINE[v["input"]["id"]]
         m["rawPrice"] = v["input"]["price"]; m["price"] = round(v["input"]["price"] * 1.1, 2)
@@ -104,10 +107,14 @@ async def main():
     print("2. правило по названию лота:", res[0][1])
 
     # --- разбор «на сколько» ---
-    pc = pricing.parse_cut
-    assert pc("10") == pricing.Cut("rub", 10) and pc("-10 ₽") == pricing.Cut("rub", 10)
-    assert pc("5%") == pricing.Cut("pct", 5) and pc("=99") == pricing.Cut("set", 99) and pc("12,5р") == pricing.Cut("rub", 12.5)
+    pc, C = pricing.parse_cut, pricing.Cut
+    assert pc("682") == C("set", 682) and pc("=682") == C("set", 682) and pc("до 682 ₽") == C("set", 682)
+    assert pc("-10") == C("rub", 10) and pc("−10 ₽") == C("rub", 10) and pc("на 10") == C("rub", 10)
+    assert pc("5%") == C("pct", 5) and pc("-5%") == C("pct", 5) and pc("12,5р") == C("set", 12.5)
     assert pc("0") is None and pc("100%") is None and pc("abc") is None
+    # не дешевле половины за раз и не дороже текущей
+    assert C("rub", 682).skip_reason(700) and C("set", 18).skip_reason(700) and C("set", 800).skip_reason(700)
+    assert C("set", 682).skip_reason(700) is None and C("pct", 50).skip_reason(700) is None
     # --- выбор своих лотов ---
     items = await PlayerokClient("T").my_items("me", statuses=["APPROVED"])
     sel = lambda q: sorted(i.id for i in pricing.select_my_lots(items, q))
@@ -127,9 +134,11 @@ async def main():
     assert "Нашёл 2" in OUT[-1][0] and "330 ₽" in OUT[-1][0], OUT[-1][0]
     await hp.cut_amount(Msg("сто"), state)
     assert "Не понял" in OUT[-1][0]
+    await hp.cut_amount(Msg("-682"), state)  # как на скриншоте: снизить на 682 ₽ — опечатка, не предлагаем
+    assert "Нечего снижать" in OUT[-1][0] and OUT[-1][1] is None and await state.get_state() == hp.CutPrice.amount.state
     await hp.cut_amount(Msg("10%"), state)
     text, kb = OUT[-1]
-    assert "110 ₽ → ~99 ₽" in text and "330 ₽ → ~297 ₽" in text and buttons(kb) == ["dp:cutok", "dp:cutno"], text
+    assert "110 ₽ → <b>~99 ₽</b>" in text and "330 ₽ → <b>~297 ₽</b>" in text and buttons(kb) == ["dp:cutok", "dp:cutno"], text
     assert UPDATES == []  # до подтверждения ничего не меняем
     await hp.cut_apply(Cb("dp:cutok"), state, sessions, cipher)
     assert UPDATES == [{"id": "my1", "price": 90}, {"id": "my2", "price": 270}], UPDATES
@@ -154,5 +163,21 @@ async def main():
     await hp.cut_cancel(Cb("dp:cutno"), state, sessions)
     assert await state.get_state() is None and len(UPDATES) == n
     print("5. «=цена», не поднимает, отмена")
+
+    # --- скриншот: «682» = поставить 682 ₽; ограничение Playerok — понятным текстом ---
+    MINE["my1"].update(price=700, rawPrice=636); MINE["my2"].update(price=684, rawPrice=622)
+    await hp.cut_start(Cb("dp:cut"), state, sessions)
+    await hp.cut_lots(Msg("робукс"), state, sessions, cipher)
+    await hp.cut_amount(Msg("682"), state)
+    text, kb = OUT[-1]
+    assert "Поставить цену 682 ₽" in text and "700 ₽ → <b>~682 ₽</b>" in text and "684 ₽ → <b>~682 ₽</b>" in text, text
+    assert kb.inline_keyboard[0][0].text == "✅ Да, снизить (2)"
+    MIN_RAW["v"] = 620  # Playerok не даёт опустить первый лот (682 ₽ → rawPrice 619)
+    n = len(UPDATES)
+    await hp.cut_apply(Cb("dp:cutok"), state, sessions, cipher)
+    final = OUT[-1][0]
+    assert "Снижено: 1 из 2" in final and "684 ₽ → 682" in final and "Playerok не даёт цену ниже 620 ₽" in final, final
+    assert len(UPDATES) == n + 1
+    print("6. «682» ставит цену; ошибка Playerok по-русски:", final.replace("\n", " | "))
     print("OK")
 asyncio.run(main())

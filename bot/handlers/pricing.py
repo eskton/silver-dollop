@@ -239,19 +239,30 @@ async def run_now(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCiph
 # ----- ✂️ разовое снижение цены своих лотов -----
 
 
-def _cut_lines(lots: list[dict], cut: pricing.Cut | None = None) -> list[str]:
-    out = []
+def _cut_lines(lots: list[dict], cut: pricing.Cut | None = None) -> tuple[list[str], int]:
+    """Строки списка и сколько лотов будет снижено."""
+    out, will = [], 0
     for lot in lots[:pricing.MAX_CUT_LOTS]:
+        name = html.escape(lot["name"][:50])
         price = lot.get("price")
         if not isinstance(price, (int, float)):
-            out.append(f"• {html.escape(lot['name'][:50])}")
+            out.append(f"• {name}")
+            will += cut is not None
         elif cut is None:
-            out.append(f"• {html.escape(lot['name'][:50])} — {pricing._rub(price)}")
+            out.append(f"• {name} — <b>{pricing._rub(price)}</b>")
+        elif why := cut.skip_reason(price):
+            out.append(f"⛔ {name}: {pricing._rub(price)} — {html.escape(why)}")
         else:
-            new = max(cut.target(price), 0)
-            arrow = f"{pricing._rub(price)} → ~{pricing._rub(new)}" if new < price else f"{pricing._rub(price)} (не трогаю)"
-            out.append(f"• {html.escape(lot['name'][:50])}: {arrow}")
-    return out
+            will += 1
+            out.append(f"✅ {name}: {pricing._rub(price)} → <b>~{pricing._rub(cut.target(price))}</b>")
+    return out, will
+
+
+AMOUNT_HELP = (
+    "<code>682</code> — поставить цену 682 ₽\n"
+    "<code>-10</code> — снизить на 10 ₽\n"
+    "<code>-5%</code> — снизить на 5 %"
+)
 
 
 @router.callback_query(F.data == "dp:cut")
@@ -301,9 +312,8 @@ async def cut_lots(message: Message, state: FSMContext, sessions: SessionFactory
     await state.set_state(CutPrice.amount)
     more = f"\n…и ещё {len(found) - len(lots)} — за раз не больше {pricing.MAX_CUT_LOTS}." if len(found) > len(lots) else ""
     await wait.edit_text(
-        f"Нашёл {len(found)}:\n" + "\n".join(_cut_lines(lots)) + more + "\n\n"
-        "Шаг 2/2. <b>На сколько снизить?</b> Цены — для покупателя, как на сайте.\n"
-        "<code>10</code> — на 10 ₽\n<code>5%</code> — на 5 %\n<code>=99</code> — поставить 99 ₽"
+        f"Нашёл {len(found)}:\n" + "\n".join(_cut_lines(lots)[0]) + more + "\n\n"
+        "Шаг 2/2. <b>Какая новая цена?</b> Цены — для покупателя, как на сайте.\n" + AMOUNT_HELP
     )
 
 
@@ -311,17 +321,24 @@ async def cut_lots(message: Message, state: FSMContext, sessions: SessionFactory
 async def cut_amount(message: Message, state: FSMContext) -> None:
     cut = pricing.parse_cut(message.text)
     if cut is None:
-        await message.answer("Не понял. Пример: <code>10</code>, <code>5%</code> или <code>=99</code>.")
+        await message.answer("Не понял. Пришли число:\n" + AMOUNT_HELP)
         return
     lots = (await state.get_data()).get("cut_lots") or []
+    lines, will = _cut_lines(lots, cut)
+    if not will:
+        await message.answer(
+            "\n".join(lines) + "\n\nНечего снижать. Пришли другое число:\n" + AMOUNT_HELP
+        )
+        return
     await state.update_data(cut_kind=cut.kind, cut_value=cut.value)
     await state.set_state(CutPrice.confirm)
+    title = f"Поставить цену {pricing._rub(cut.value)}" if cut.kind == "set" else f"Снизить {cut.label()}"
     await message.answer(
-        f"✂️ <b>Снизить {cut.label()}?</b>\n\n" + "\n".join(_cut_lines(lots, cut)) + "\n\n"
-        "Точная цена будет после пересчёта комиссии Playerok. Цену только снижаю. "
-        "Возможно, после смены цены лот уйдёт на проверку.",
+        f"✂️ <b>{title}?</b>\n\n" + "\n".join(lines) + "\n\n"
+        "Точная цена будет после пересчёта комиссии Playerok. Цену только снижаю и не дешевле "
+        "половины текущей за раз. Возможно, после смены цены лот уйдёт на проверку.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [_btn("✅ Снизить", "dp:cutok"), _btn("Отмена", "dp:cutno")],
+            [_btn(f"✅ Да, снизить ({will})", "dp:cutok"), _btn("Отмена", "dp:cutno")],
         ]),
     )
 
@@ -370,7 +387,7 @@ async def cut_apply(cb: CallbackQuery, state: FSMContext, sessions: SessionFacto
                 lines.append("⚠️ Сессия Playerok истекла — остальные не трогал.")
                 break
             except PlayerokError as e:
-                note, ok = f"ошибка: {str(e)[:200]}", False
+                note, ok = pricing.price_error(str(e)), False
             changed += ok
             lines.append(f"{'✅' if ok else '•'} {html.escape(lot['name'][:50])}: {html.escape(note)}")
             log.info("%s снижение цены вручную «%s»: %s", tag(seller.tg_id), lot["name"][:60], note)
