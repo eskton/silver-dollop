@@ -48,6 +48,7 @@ class AddPriceRule(StatesGroup):
 
 class CutPrice(StatesGroup):
     lots = State()
+    pick = State()
     amount = State()
     confirm = State()
 
@@ -276,7 +277,7 @@ async def cut_start(cb: CallbackQuery, state: FSMContext, sessions: SessionFacto
     await cb.answer()
     await cb.message.answer(
         "✂️ <b>Снизить цену своих лотов</b>\n\n"
-        "Шаг 1/2. Какие лоты? Пришли:\n"
+        "Шаг 1/3. Какие лоты? Пришли:\n"
         "• ключевые слова, например <code>робукс</code> или <code>100 робукс</code> — все твои активные "
         "лоты с ними в названии;\n"
         "• или точное название лота;\n"
@@ -307,14 +308,102 @@ async def cut_lots(message: Message, state: FSMContext, sessions: SessionFactory
             "Пришли другие слова или нажми «Отмена»."
         )
         return
+    found.sort(key=lambda it: -(it.price or 0))
     lots = [{"id": it.id, "name": it.name, "price": it.price} for it in found[:pricing.MAX_CUT_LOTS]]
-    await state.update_data(cut_lots=lots)
-    await state.set_state(CutPrice.amount)
     more = f"\n…и ещё {len(found) - len(lots)} — за раз не больше {pricing.MAX_CUT_LOTS}." if len(found) > len(lots) else ""
-    await wait.edit_text(
-        f"Нашёл {len(found)}:\n" + "\n".join(_cut_lines(lots)[0]) + more + "\n\n"
-        "Шаг 2/2. <b>Какая новая цена?</b> Цены — для покупателя, как на сайте.\n" + AMOUNT_HELP
+    if len(lots) == 1:
+        await state.update_data(cut_lots=lots)
+        await _ask_amount(wait, state, lots)
+        return
+    await state.update_data(cut_all=lots, cut_sel=list(range(len(lots))), cut_more=more)
+    await state.set_state(CutPrice.pick)
+    await wait.edit_text(_pick_text(lots, more), reply_markup=_pick_kb(lots, set(range(len(lots)))))
+
+
+def _price_key(price) -> str:
+    return f"{price:g}" if isinstance(price, (int, float)) else "?"
+
+
+def _pick_text(lots: list[dict], more: str = "") -> str:
+    return (
+        f"Нашёл {len(lots)}.{more}\n\n"
+        "Шаг 2/3. <b>Какие снижать?</b> Нажми на лот, чтобы снять или поставить ✅. "
+        "Кнопки «Только … ₽» оставят лоты с этой ценой. Потом «➡️ Дальше»."
     )
+
+
+def _pick_kb(lots: list[dict], sel: set[int]) -> InlineKeyboardMarkup:
+    rows = [
+        [_btn(f"{'✅' if i in sel else '⬜'} {_price_key(lot.get('price'))} ₽ · {lot['name'][:32]}", f"dp:cs:{i}")]
+        for i, lot in enumerate(lots)
+    ]
+    prices: dict[str, int] = {}
+    for lot in lots:
+        key = _price_key(lot.get("price"))
+        prices[key] = prices.get(key, 0) + 1
+    if len(prices) > 1:
+        rows += [[_btn(f"Только {key} ₽ ({n})", f"dp:csp:{key}")] for key, n in prices.items() if key != "?"][:6]
+    rows.append([_btn("✅ Все", "dp:csall"), _btn("⬜ Ни одного", "dp:csnone")])
+    rows.append([_btn(f"➡️ Дальше ({len(sel)})", "dp:csok")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _ask_amount(msg: Message, state: FSMContext, lots: list[dict]) -> None:
+    await state.set_state(CutPrice.amount)
+    await msg.edit_text(
+        f"Снижаю {len(lots)}:\n" + "\n".join(_cut_lines(lots)[0]) + "\n\n"
+        "Шаг 3/3. <b>Какая новая цена?</b> Цены — для покупателя, как на сайте.\n" + AMOUNT_HELP
+    )
+
+
+async def _pick_update(cb: CallbackQuery, state: FSMContext, sel: set[int]) -> None:
+    data = await state.get_data()
+    await state.update_data(cut_sel=sorted(sel))
+    await cb.answer()
+    try:
+        await cb.message.edit_reply_markup(reply_markup=_pick_kb(data.get("cut_all") or [], sel))
+    except Exception:
+        pass
+
+
+@router.callback_query(StateFilter(CutPrice.pick), F.data.startswith("dp:cs:"))
+async def cut_pick_toggle(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    sel = set(data.get("cut_sel") or [])
+    i = int(cb.data.rsplit(":", 1)[1])
+    sel ^= {i}
+    await _pick_update(cb, state, sel)
+
+
+@router.callback_query(StateFilter(CutPrice.pick), F.data.startswith("dp:csp:"))
+async def cut_pick_price(cb: CallbackQuery, state: FSMContext) -> None:
+    key = cb.data.split(":", 2)[2]
+    lots = (await state.get_data()).get("cut_all") or []
+    await _pick_update(cb, state, {i for i, lot in enumerate(lots) if _price_key(lot.get("price")) == key})
+
+
+@router.callback_query(StateFilter(CutPrice.pick), F.data.in_({"dp:csall", "dp:csnone"}))
+async def cut_pick_all(cb: CallbackQuery, state: FSMContext) -> None:
+    lots = (await state.get_data()).get("cut_all") or []
+    await _pick_update(cb, state, set(range(len(lots))) if cb.data == "dp:csall" else set())
+
+
+@router.callback_query(StateFilter(CutPrice.pick), F.data == "dp:csok")
+async def cut_pick_ok(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    lots = data.get("cut_all") or []
+    chosen = [lots[i] for i in data.get("cut_sel") or [] if i < len(lots)]
+    if not chosen:
+        await cb.answer("Отметь хотя бы один лот ✅", show_alert=True)
+        return
+    await state.update_data(cut_lots=chosen)
+    await cb.answer()
+    await _ask_amount(cb.message, state, chosen)
+
+
+@router.callback_query(F.data.startswith("dp:cs"))
+async def cut_pick_stale(cb: CallbackQuery) -> None:
+    await cb.answer("Устарело — начни заново: «✂️ Снизить цену своих лотов».", show_alert=True)
 
 
 @router.message(CutPrice.amount, F.text, ~F.text.func(is_cancel))

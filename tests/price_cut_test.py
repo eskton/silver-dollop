@@ -136,7 +136,21 @@ async def main():
     await hp.cut_lots(Msg("fortnite"), state, sessions, cipher)
     assert "ничего не нашёл" in OUT[-1][0] and await state.get_state() == hp.CutPrice.lots.state
     await hp.cut_lots(Msg("робукс"), state, sessions, cipher)
-    assert "Нашёл 2" in OUT[-1][0] and "330 ₽" in OUT[-1][0], OUT[-1][0]
+    text, kb = OUT[-1]
+    assert "Нашёл 2" in text and await state.get_state() == hp.CutPrice.pick.state, text
+    assert buttons(kb) == ["dp:cs:0", "dp:cs:1", "dp:csp:330", "dp:csp:110", "dp:csall", "dp:csnone", "dp:csok"], buttons(kb)
+    assert kb.inline_keyboard[0][0].text.startswith("✅ 330 ₽ · 400 робуксов")  # дорогие сверху
+    # галочки: снять одну, «ни одного» → «Дальше» не пускает, «все» → дальше
+    cb = Cb("dp:cs:0"); cb.message = Msg()
+    await hp.cut_pick_toggle(cb, state)
+    assert (await state.get_data())["cut_sel"] == [1]
+    await hp.cut_pick_all(Cb("dp:csnone"), state)
+    cb = Cb("dp:csok")
+    await hp.cut_pick_ok(cb, state)
+    assert cb.alerts and await state.get_state() == hp.CutPrice.pick.state
+    await hp.cut_pick_all(Cb("dp:csall"), state)
+    await hp.cut_pick_ok(Cb("dp:csok"), state)
+    assert "Снижаю 2" in OUT[-1][0] and "330 ₽" in OUT[-1][0] and await state.get_state() == hp.CutPrice.amount.state, OUT[-1][0]
     await hp.cut_amount(Msg("сто"), state)
     assert "Не понял" in OUT[-1][0]
     await hp.cut_amount(Msg("-682"), state)  # как на скриншоте: снизить на 682 ₽ — опечатка, не предлагаем
@@ -146,7 +160,7 @@ async def main():
     assert "110 ₽ → <b>~99 ₽</b>" in text and "330 ₽ → <b>~297 ₽</b>" in text and buttons(kb) == ["dp:cutok", "dp:cutno"], text
     assert UPDATES == []  # до подтверждения ничего не меняем
     await hp.cut_apply(Cb("dp:cutok"), state, sessions, cipher)
-    assert UPDATES == [{"id": "my1", "price": 90}, {"id": "my2", "price": 270}], UPDATES
+    assert UPDATES == [{"id": "my2", "price": 270}, {"id": "my1", "price": 90}], UPDATES
     final = OUT[-1][0]
     assert "Снижено: 2 из 2" in final and "110 ₽ → 99 ₽" in final and "330 ₽ → 297 ₽" in final, final
     cb = Cb("dp:cutok")  # повторное нажатие — ничего не делает
@@ -169,21 +183,28 @@ async def main():
     assert await state.get_state() is None and len(UPDATES) == n
     print("5. «=цена», не поднимает, отмена")
 
-    # --- скриншот: «682» = поставить 682 ₽; ограничение Playerok — понятным текстом ---
+    # --- скриншот: два лота с одним названием, 700 и 684 ₽; снижаем только те, что за 684 ---
     MINE["my1"].update(price=700, rawPrice=636); MINE["my2"].update(price=684, rawPrice=622)
     await hp.cut_start(Cb("dp:cut"), state, sessions)
     await hp.cut_lots(Msg("робукс"), state, sessions, cipher)
+    assert "dp:csp:684" in buttons(OUT[-1][1]) and "dp:csp:700" in buttons(OUT[-1][1])
+    await hp.cut_pick_price(Cb("dp:csp:684"), state)
+    await hp.cut_pick_ok(Cb("dp:csok"), state)
+    assert "Снижаю 1" in OUT[-1][0] and "700" not in OUT[-1][0], OUT[-1][0]
     await hp.cut_amount(Msg("682"), state)
     text, kb = OUT[-1]
-    assert "Поставить цену 682 ₽" in text and "700 ₽ → <b>~682 ₽</b>" in text and "684 ₽ → <b>~682 ₽</b>" in text, text
-    assert kb.inline_keyboard[0][0].text == "✅ Да, снизить (2)"
-    MIN_RAW["v"] = 620  # Playerok не даёт опустить первый лот (682 ₽ → rawPrice 619)
+    assert "Поставить цену 682 ₽" in text and "684 ₽ → <b>~682 ₽</b>" in text and "700 ₽" not in text, text
+    assert kb.inline_keyboard[0][0].text == "✅ Да, снизить (1)"
     n = len(UPDATES)
     await hp.cut_apply(Cb("dp:cutok"), state, sessions, cipher)
     final = OUT[-1][0]
-    assert "Снижено: 1 из 2" in final and "684 ₽ → 682" in final and "Playerok не даёт цену ниже 620 ₽" in final, final
-    assert len(UPDATES) == n + 1
-    print("6. «682» ставит цену; ошибка Playerok по-русски:", final.replace("\n", " | "))
+    assert "Снижено: 1 из 1" in final and "684 ₽ → 682" in final, final
+    assert UPDATES[n:] == [{"id": "my2", "price": 620}], UPDATES[n:]  # лот за 700 не трогали
+    # ошибка Playerok о минимальной цене — по-русски
+    MIN_RAW["v"] = 620
+    note, ok = await pricing.cut_price(PlayerokClient("T"), "my1", pricing.Cut("set", 682))
+    assert not ok and "Playerok не даёт цену ниже 620 ₽" in note, note
+    print("6. только лоты за 684 ₽:", final.replace("\n", " | "))
 
     # --- скриншот 2: «Minimal discount -» без числа — по-русски и с подробностями из extensions ---
     MIN_DISCOUNT["on"], MIN_RAW["v"] = True, 0
