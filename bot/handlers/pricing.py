@@ -308,12 +308,24 @@ async def cut_lots(message: Message, state: FSMContext, sessions: SessionFactory
             "Пришли другие слова или нажми «Отмена»."
         )
         return
+    premium = [it for it in found if it.is_premium]
+    found = [it for it in found if not it.is_premium]
+    skipped = (
+        f"\n⭐ Премиум-лоты ({len(premium)}) пропускаю — Playerok не даёт менять им цену." if premium else ""
+    )
+    if not found:
+        await wait.edit_text(
+            f"Все найденные лоты ({len(premium)}) — с премиум-статусом, Playerok не даёт менять им цену. "
+            "Пришли другие слова или нажми «Отмена»."
+        )
+        return
     found.sort(key=lambda it: -(it.price or 0))
     lots = [{"id": it.id, "name": it.name, "price": it.price} for it in found[:pricing.MAX_CUT_LOTS]]
     more = f"\n…и ещё {len(found) - len(lots)} — за раз не больше {pricing.MAX_CUT_LOTS}." if len(found) > len(lots) else ""
+    more += skipped
     if len(lots) == 1:
         await state.update_data(cut_lots=lots)
-        await _ask_amount(wait, state, lots)
+        await _ask_amount(wait, state, lots, skipped)
         return
     await state.update_data(cut_all=lots, cut_sel=list(range(len(lots))), cut_more=more)
     await state.set_state(CutPrice.pick)
@@ -348,10 +360,10 @@ def _pick_kb(lots: list[dict], sel: set[int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _ask_amount(msg: Message, state: FSMContext, lots: list[dict]) -> None:
+async def _ask_amount(msg: Message, state: FSMContext, lots: list[dict], note: str = "") -> None:
     await state.set_state(CutPrice.amount)
     await msg.edit_text(
-        f"Снижаю {len(lots)}:\n" + "\n".join(_cut_lines(lots)[0]) + "\n\n"
+        f"Снижаю {len(lots)}:\n" + "\n".join(_cut_lines(lots)[0]) + note + "\n\n"
         "Шаг 3/3. <b>Какая новая цена?</b> Цены — для покупателя, как на сайте.\n" + AMOUNT_HELP
     )
 

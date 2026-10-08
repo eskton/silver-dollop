@@ -183,14 +183,13 @@ async def main():
     assert await state.get_state() is None and len(UPDATES) == n
     print("5. «=цена», не поднимает, отмена")
 
-    # --- скриншот: два лота с одним названием, 700 и 684 ₽; снижаем только те, что за 684 ---
-    MINE["my1"].update(price=700, rawPrice=636); MINE["my2"].update(price=684, rawPrice=622)
+    # --- скриншот: лот за 700 — премиум (цену менять нельзя), за 684 — обычный ---
+    MINE["my1"].update(price=700, rawPrice=636, priority="PREMIUM"); MINE["my2"].update(price=684, rawPrice=622)
     await hp.cut_start(Cb("dp:cut"), state, sessions)
     await hp.cut_lots(Msg("робукс"), state, sessions, cipher)
-    assert "dp:csp:684" in buttons(OUT[-1][1]) and "dp:csp:700" in buttons(OUT[-1][1])
-    await hp.cut_pick_price(Cb("dp:csp:684"), state)
-    await hp.cut_pick_ok(Cb("dp:csok"), state)
-    assert "Снижаю 1" in OUT[-1][0] and "700" not in OUT[-1][0], OUT[-1][0]
+    text = OUT[-1][0]
+    assert "Премиум-лоты (1) пропускаю" in text and "Снижаю 1" in text and "700" not in text, text
+    assert await state.get_state() == hp.CutPrice.amount.state  # один обычный лот — без выбора
     await hp.cut_amount(Msg("682"), state)
     text, kb = OUT[-1]
     assert "Поставить цену 682 ₽" in text and "684 ₽ → <b>~682 ₽</b>" in text and "700 ₽" not in text, text
@@ -199,12 +198,22 @@ async def main():
     await hp.cut_apply(Cb("dp:cutok"), state, sessions, cipher)
     final = OUT[-1][0]
     assert "Снижено: 1 из 1" in final and "684 ₽ → 682" in final, final
-    assert UPDATES[n:] == [{"id": "my2", "price": 620}], UPDATES[n:]  # лот за 700 не трогали
+    assert UPDATES[n:] == [{"id": "my2", "price": 620}], UPDATES[n:]  # премиум-лот за 700 не трогали
+    # даже если премиум-лот попадёт в список — цену ему не меняем
+    n = len(UPDATES)
+    note, ok = await pricing.cut_price(PlayerokClient("T"), "my1", pricing.Cut("set", 682))
+    assert not ok and "премиум" in note and len(UPDATES) == n, note
+    # автоснижение тоже берёт обычный лот, а не премиум с тем же названием
+    from bot.playerok.client import Item
+    same = [Item.from_raw({**MINE["my1"]}), Item.from_raw({**MINE["my2"], "name": MINE["my1"]["name"]})]
+    assert pricing.find_my_lot(same, SimpleNamespace(lot_key=MINE["my1"]["name"])).id == "my2"
+    MINE["my1"]["priority"] = "DEFAULT"
+    print("6. премиум-лоты пропускает, снижает только обычные:", final.replace("\n", " | "))
     # ошибка Playerok о минимальной цене — по-русски
     MIN_RAW["v"] = 620
     note, ok = await pricing.cut_price(PlayerokClient("T"), "my1", pricing.Cut("set", 682))
     assert not ok and "Playerok не даёт цену ниже 620 ₽" in note, note
-    print("6. только лоты за 684 ₽:", final.replace("\n", " | "))
+    print("6b. минимальная цена — по-русски:", note)
 
     # --- скриншот 2: «Minimal discount -» без числа — по-русски и с подробностями из extensions ---
     MIN_DISCOUNT["on"], MIN_RAW["v"] = True, 0

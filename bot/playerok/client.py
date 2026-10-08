@@ -146,6 +146,11 @@ class Item:
         return f"{BASE_URL}/products/{self.slug or self.id}"
 
     @property
+    def is_premium(self) -> bool:
+        """Лот выставлен с премиум-статусом: Playerok не даёт менять ему цену."""
+        return self.priority.upper() == "PREMIUM"
+
+    @property
     def is_paid_relist(self) -> bool:
         return isinstance(self.relist_price, (int, float)) and self.relist_price > 0
 

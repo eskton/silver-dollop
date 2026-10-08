@@ -84,14 +84,16 @@ def kw_label(rule: PriceRule) -> str:
 
 def find_my_lot(items: list[Item], rule: PriceRule) -> Item | None:
     key = rule.lot_key.strip()
+    # По названию — только обычные лоты: премиум-лотам Playerok не даёт менять цену.
+    by_name = [it for it in items if not it.is_premium]
     for it in items:
         if key in (it.id, it.slug) or (it.slug and key.rstrip("/").endswith("/" + it.slug)):
             return it
     target = _norm(key)
-    exact = [it for it in items if _norm(it.name) == target]
+    exact = [it for it in by_name if _norm(it.name) == target]
     if exact:
         return exact[0]
-    loose = [it for it in items if kw_match(key, it.name)]
+    loose = [it for it in by_name if kw_match(key, it.name)]
     return loose[0] if len(loose) == 1 else None
 
 
@@ -112,6 +114,8 @@ async def check_rule(
     if mine is None:
         return "мой лот не найден среди активных — проверь название", False
     item = await client.get_item(mine.id)
+    if item.is_premium:
+        return "лот с премиум-статусом — Playerok не даёт менять ему цену", False
     price, raw = item.price, item.raw_price
     if not isinstance(price, (int, float)) or not isinstance(raw, (int, float)) or price <= 0 or raw <= 0:
         return "Playerok не отдал цену лота", False
@@ -302,6 +306,8 @@ async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str
     """Снижает цену одного своего лота. (пометка, изменили ли цену). Цены — для покупателя."""
     item = await client.get_item(item_id)
     price, raw = item.price, item.raw_price
+    if item.is_premium:
+        return f"{_rub(price or 0)} — премиум-лот, Playerok не даёт менять ему цену, не трогаю", False
     if not isinstance(price, (int, float)) or not isinstance(raw, (int, float)) or price <= 0 or raw <= 0:
         return "Playerok не отдал цену лота", False
     why = cut.skip_reason(price)
@@ -317,7 +323,7 @@ async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str
     except AuthRequired:
         raise
     except PlayerokError as e:
-        return price_error(str(e)), False
+        return f"{_rub(price)} → {_rub(target)}: {price_error(str(e))}", False
     after = answer.get("price")
     if not isinstance(after, (int, float)):
         after = (await client.get_item(item.id)).price
