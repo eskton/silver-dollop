@@ -124,6 +124,12 @@ async def sync_seller(
                 raise
             except PlayerokError as e:
                 log.warning("%s снижение цен: %s", tag(seller.tg_id), e)
+            try:
+                await pricing.track_market(bot, sessions, seller, client)
+            except AuthRequired:
+                raise
+            except PlayerokError as e:
+                log.warning("%s трекер рынка: %s", tag(seller.tg_id), e)
     finally:
         if own_client:
             await client.aclose()

@@ -29,11 +29,13 @@ class NominalInput(StatesGroup):
     link = State()
     divisor = State()
     costs = State()
+    fazer = State()
+    track_min = State()
 
 
-NOMINAL_LINK_KEY = "nominal_lot_ref"
-NOMINAL_DIV_KEY = "nominal_divisor"
-NOMINAL_COSTS_KEY = "nominal_costs"
+NOMINAL_LINK_KEY = pricing.NOMINAL_LINK_KEY
+NOMINAL_DIV_KEY = pricing.NOMINAL_DIV_KEY
+NOMINAL_COSTS_KEY = pricing.NOMINAL_COSTS_KEY
 
 
 class AddPriceRule(StatesGroup):
@@ -208,24 +210,37 @@ NOMINAL_TIMEOUT = 180  # секунд на весь отчёт
 _NOMINAL_RUNNING: set[int] = set()
 
 
-def _nominal_kb(divisor: float) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+async def _nominal_kb(sessions: SessionFactory, tg: int) -> InlineKeyboardMarkup:
+    from ..plugins.access import is_admin
+
+    async with sessions() as session:
+        divisor = await pricing.get_divisor(session, tg)
+        fazer_name = (await ft.get_setting(session, tg, pricing.FAZER_NAME_KEY, "")
+                      or await ft.get_setting(session, tg, pricing.FAZER_CAT_KEY, ""))
+        track_on = await ft.get_setting(session, tg, pricing.TRACK_KEY, "0") == "1"
+        track_min = await ft.get_setting(session, tg, pricing.TRACK_MIN_KEY, "0.01")
+    rows = [
         [_btn("🔄 Обновить", "dp:nomrun")],
-        [_btn("💵 Закупка", "dp:nomcost"), _btn(f"➗ Курс: {divisor:g}", "dp:nomdiv")],
+        [_btn("💵 Закупка вручную", "dp:nomcost"), _btn(f"➗ Курс: {divisor:g}", "dp:nomdiv")],
+    ]
+    if is_admin(tg):
+        rows.append([_btn(f"🎁 FazerCards: {fazer_name[:20]}" if fazer_name else "🎁 Закупка с FazerCards", "dp:fz")]
+                    + ([_btn("✖️", "dp:fzoff")] if fazer_name else []))
+    rows += [
+        [_btn("🔔 Трекер: вкл" if track_on else "🔕 Трекер: выкл", "dp:trk"),
+         _btn(f"Порог: ${track_min}", "dp:trkmin")],
         [_btn("🔗 Другая категория", "dp:nomlink")],
         [_btn("‹ К калькулятору", "pc")],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCipher, user) -> None:
     async with sessions() as session:
         seller = await get_or_create_seller(session, user)
         ref = await ft.get_setting(session, user.id, NOMINAL_LINK_KEY, "")
-        try:
-            divisor = float(await ft.get_setting(session, user.id, NOMINAL_DIV_KEY, "104"))
-        except ValueError:
-            divisor = 104.0
-        costs = pricing.parse_costs(await ft.get_setting(session, user.id, NOMINAL_COSTS_KEY, ""))
+        divisor = await pricing.get_divisor(session, user.id)
+        costs, cost_note = await pricing.load_costs(session, user.id)
     if not seller.is_connected:
         await message.answer("Аккаунт Playerok не подключён.")
         return
@@ -258,7 +273,7 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
         async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
             client.on_wait = on_wait
             text = await asyncio.wait_for(
-                pricing.nominal_report(client, ref, divisor or 104.0, costs=costs,
+                pricing.nominal_report(client, ref, divisor, costs=costs, cost_note=cost_note,
                                        own_user_id=seller.playerok_id, on_page=on_page),
                 timeout=NOMINAL_TIMEOUT,
             )
@@ -276,7 +291,7 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
         await status.delete()
     except Exception:
         pass
-    await message.answer(text[:4000], reply_markup=_nominal_kb(divisor))
+    await message.answer(text[:4000], reply_markup=await _nominal_kb(sessions, user.id))
 
 
 @router.callback_query(F.data == "dp:nom")
@@ -370,6 +385,139 @@ async def nominal_save_div(message: Message, state: FSMContext, sessions: Sessio
         seller = await get_or_create_seller(session, message.from_user)
     await message.answer(f"✅ Делитель: {value:g}", reply_markup=main_menu(seller.is_connected))
     await _nominal(message, sessions, cipher, message.from_user)
+
+
+# ----- закупка с FazerCards -----
+
+
+@router.callback_query(F.data == "dp:fz")
+async def fazer_ask(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    from ..plugins.access import is_admin
+    from ..plugins.giftcard import service as gc
+
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Только для владельца", show_alert=True)
+        return
+    async with sessions() as session:
+        key = await gc.get_api_key(session, cb.from_user.id)
+    if not key:
+        await cb.answer("Сначала введи API-ключ FazerCards: /giftcard → 🔑", show_alert=True)
+        return
+    await state.set_state(NominalInput.fazer)
+    await cb.answer()
+    await cb.message.answer(
+        "С какой картой FazerCards сравнивать? Напиши часть названия, например <code>roblox</code>:",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.message(NominalInput.fazer, F.text, ~F.text.func(is_cancel))
+async def fazer_search(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
+    from ..plugins.giftcard import service as gc
+    from ..plugins.giftcard.client import FazerError
+
+    async with sessions() as session:
+        key = await gc.get_api_key(session, message.from_user.id)
+    try:
+        async with gc.make_client(key) as api:
+            cats = await api.categories()
+    except FazerError as e:
+        await message.answer(f"⚠️ FazerCards: <code>{html.escape(str(e))[:200]}</code>")
+        return
+    q = message.text.strip().lower()
+    found = [(str(c.get("category_id")), str(c.get("name") or c.get("category_id")))
+             for c in cats if c.get("category_id") and q in str(c.get("name") or "").lower()][:20]
+    if not found:
+        await message.answer("Ничего не нашёл. Напиши другую часть названия.")
+        return
+    await state.update_data(fazer_found=found)
+    await message.answer(
+        "Выбери карту:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_btn(name[:60], f"dp:fzc:{i}")] for i, (_, name) in enumerate(found)]),
+    )
+
+
+@router.callback_query(NominalInput.fazer, F.data.startswith("dp:fzc:"))
+async def fazer_pick(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    found = (await state.get_data()).get("fazer_found") or []
+    idx = int(cb.data.split(":")[2])
+    if idx >= len(found):
+        await cb.answer("Список устарел, поищи ещё раз", show_alert=True)
+        return
+    cat_id, name = found[idx]
+    await state.clear()
+    async with sessions() as session:
+        await ft.set_setting(session, cb.from_user.id, pricing.FAZER_CAT_KEY, cat_id)
+        await ft.set_setting(session, cb.from_user.id, pricing.FAZER_NAME_KEY, name[:60])
+        seller = await get_or_create_seller(session, cb.from_user)
+    await cb.answer()
+    await cb.message.answer(f"✅ Закупка с FazerCards: {html.escape(name)}", reply_markup=main_menu(seller.is_connected))
+    await _nominal(cb.message, sessions, cipher, cb.from_user)
+
+
+@router.callback_query(F.data == "dp:fzoff")
+async def fazer_off(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        await ft.set_setting(session, cb.from_user.id, pricing.FAZER_CAT_KEY, "")
+        await ft.set_setting(session, cb.from_user.id, pricing.FAZER_NAME_KEY, "")
+    await cb.answer("FazerCards отключён — считаю по закупке вручную", show_alert=True)
+    try:
+        await cb.message.edit_reply_markup(reply_markup=await _nominal_kb(sessions, cb.from_user.id))
+    except Exception:
+        pass
+
+
+# ----- трекер выгодных номиналов -----
+
+
+@router.callback_query(F.data == "dp:trk")
+async def track_toggle(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    tg = cb.from_user.id
+    async with sessions() as session:
+        on = await ft.get_setting(session, tg, pricing.TRACK_KEY, "0") == "1"
+        if not on:
+            if not await ft.get_setting(session, tg, NOMINAL_LINK_KEY, ""):
+                await cb.answer("Сначала открой отчёт и пришли ссылку на лот", show_alert=True)
+                return
+            costs, _ = await pricing.load_costs(session, tg)
+            if not costs:
+                await cb.answer("Сначала задай закупку: «💵 Закупка вручную» или «🎁 FazerCards»", show_alert=True)
+                return
+        await ft.set_setting(session, tg, pricing.TRACK_KEY, "0" if on else "1")
+        await ft.set_setting(session, tg, pricing.TRACK_SEEN_KEY, "")
+        await ft.set_setting(session, tg, pricing.TRACK_LAST_KEY, "")
+        minimum = await ft.get_setting(session, tg, pricing.TRACK_MIN_KEY, "0.01")
+    await cb.answer(
+        "🔕 Трекер выключен" if on else
+        f"🔔 Трекер включён: проверяю раз в 30 мин и пишу, когда номинал стал выгодным (прибыль ≥ ${minimum})",
+        show_alert=True,
+    )
+    try:
+        await cb.message.edit_reply_markup(reply_markup=await _nominal_kb(sessions, tg))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "dp:trkmin")
+async def track_min_ask(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(NominalInput.track_min)
+    await cb.answer()
+    await cb.message.answer("С какой прибыли в $ на одну продажу уведомлять? Например <code>0.05</code>:",
+                            reply_markup=cancel_kb())
+
+
+@router.message(NominalInput.track_min, F.text, ~F.text.func(is_cancel))
+async def track_min_save(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
+    value = _num(message.text.replace("$", ""))
+    if value is None:
+        await message.answer("Нужно число, например 0.05.")
+        return
+    await state.clear()
+    async with sessions() as session:
+        await ft.set_setting(session, message.from_user.id, pricing.TRACK_MIN_KEY, f"{value:g}")
+        await ft.set_setting(session, message.from_user.id, pricing.TRACK_SEEN_KEY, "")
+        seller = await get_or_create_seller(session, message.from_user)
+    await message.answer(f"✅ Порог трекера: ${value:g}", reply_markup=main_menu(seller.is_connected))
 
 
 @router.message(StateFilter(AddPriceRule, NominalInput), F.text.func(is_cancel))

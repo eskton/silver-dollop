@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from aiogram import Bot
@@ -199,16 +200,88 @@ def parse_costs(text: str) -> dict[int, float]:
     return costs
 
 
-async def nominal_report(
-    client: PlayerokClient, lot_ref: str, divisor: float, pages: int = 5,
-    costs: dict[int, float] | None = None, own_user_id: str | None = None,
-    on_page=None,
-) -> str:
-    """Калькулятор выгоды по рынку: для каждого номинала в категории (и способе получения)
-    лота lot_ref — самый дешёвый ЧУЖОЙ лот (свои исключены), его цена для покупателя
-    ÷ divisor, минус закупка → прибыль с продажи. pages по 24 лота — Playerok ограничивает
-    частоту запросов, поэтому немного."""
-    costs = costs or {}
+# ----- настройки калькулятора «Выгода по рынку» и трекера -----
+NOMINAL_LINK_KEY = "nominal_lot_ref"
+NOMINAL_DIV_KEY = "nominal_divisor"
+NOMINAL_COSTS_KEY = "nominal_costs"          # закупка вручную: «100 0.95» по строкам
+FAZER_CAT_KEY = "nominal_fazer_cat"          # категория FazerCards — закупка оттуда
+FAZER_NAME_KEY = "nominal_fazer_name"
+TRACK_KEY = "market_track"                   # трекер выгодных номиналов вкл/выкл
+TRACK_MIN_KEY = "market_track_min"           # минимальная прибыль $ для уведомления
+TRACK_LAST_KEY = "market_track_last"
+TRACK_SEEN_KEY = "market_track_seen"         # номиналы, о которых уже уведомили
+TRACK_EVERY = timedelta(minutes=30)
+
+
+@dataclass
+class Cost:
+    usd: float
+    source: str  # "fazer" | "manual"
+    stock: int | None = None
+
+
+@dataclass
+class MarketScan:
+    best: dict[int, Item]
+    scanned: int
+    partial: bool
+    way: str
+
+
+@dataclass
+class MarketRow:
+    nominal: int
+    lot: Item
+    usd: float
+    cost: Cost | None
+    profit: float | None
+
+
+async def get_divisor(session, tg: int) -> float:
+    try:
+        return float(await ft.get_setting(session, tg, NOMINAL_DIV_KEY, "104")) or 104.0
+    except ValueError:
+        return 104.0
+
+
+async def load_costs(session, tg: int) -> tuple[dict[int, Cost], str | None]:
+    """Закупка по номиналам: вручную + цены FazerCards (они главнее, если выбрана категория).
+    FazerCards — только админу (ключ владельца)."""
+    costs = {n: Cost(v, "manual") for n, v in parse_costs(await ft.get_setting(session, tg, NOMINAL_COSTS_KEY, "")).items()}
+    cat = await ft.get_setting(session, tg, FAZER_CAT_KEY, "")
+    if not cat:
+        return costs, None
+    from ..plugins.access import is_admin
+    from ..plugins.giftcard import service as gc
+    from ..plugins.giftcard.client import FazerError
+
+    if not is_admin(tg):
+        return costs, None
+    key = await gc.get_api_key(session, tg)
+    if not key:
+        return costs, "FazerCards: не задан API-ключ (/giftcard → 🔑)"
+    try:
+        async with gc.make_client(key) as api:
+            data = await api.offers(cat)
+    except FazerError as e:
+        return costs, f"FazerCards: {e}"
+    for o in data.get("offers") or []:
+        n = nominal_of(str(o.get("name") or "")) or nominal_of(str(o.get("card_id") or "").replace("_", " "))
+        try:
+            price = float(o.get("price_usd"))
+        except (TypeError, ValueError):
+            continue
+        if n is not None:
+            stock = o.get("stock") if isinstance(o.get("stock"), int) else None
+            costs[n] = Cost(price, "fazer", stock)
+    return costs, None
+
+
+async def market_scan(
+    client: PlayerokClient, lot_ref: str, pages: int = 5, own_user_id: str | None = None, on_page=None,
+) -> MarketScan:
+    """Самый дешёвый ЧУЖОЙ лот каждого номинала в категории (и способе получения) лота lot_ref.
+    pages по 24 лота — Playerok ограничивает частоту запросов, поэтому немного."""
     ref = lot_ref.strip()
     slug = ref.split("/products/", 1)[1].split("?")[0].strip("/") if "/products/" in ref else ref
     try:
@@ -216,7 +289,7 @@ async def nominal_report(
     except PlayerokError as e:
         raise PlayerokError(f"лот по ссылке: {e}") from e
     if not item.category_id:
-        return "Playerok не отдал категорию этого лота."
+        raise PlayerokError("Playerok не отдал категорию этого лота")
     try:
         lots = await client.category_items(item.category_id, pages=pages,
                                            obtaining_type_id=item.obtaining_type_id or None, on_page=on_page)
@@ -241,26 +314,112 @@ async def nominal_report(
         if n not in best or o.price < best[n].price:
             best[n] = o
     way = f" · {html.escape(item.obtaining_type_name)}" if item.obtaining_type_name else ""
-    lines = [
-        f"🧮 <b>Выгода по рынку</b>{way}",
-        f"чужих лотов просмотрено: {len(lots)}, курс ÷{divisor:g}"
-        + (" — <b>частично</b>: Playerok ограничил запросы, нажми «🔄» позже" if partial else ""),
-        "<i>самая низкая цена конкурента ÷ курс − закупка = прибыль с продажи</i>",
-        "",
-    ]
-    if not best:
-        lines.append("Не нашёл чужих лотов с номиналом в названии.")
-    for n in sorted(best):
-        o = best[n]
-        usd = o.price / divisor
-        line = f"<b>{n}</b> · {_rub(o.price)} ÷ {divisor:g} = <b>${usd:.2f}</b> — " f'<a href="{o.url}">лот</a>'
+    return MarketScan(best, len(lots), partial, way)
+
+
+def market_rows(scan: MarketScan, divisor: float, costs: dict[int, Cost]) -> list[MarketRow]:
+    rows = []
+    for n in sorted(scan.best):
+        lot = scan.best[n]
+        usd = lot.price / divisor
         cost = costs.get(n)
-        if cost is not None:
-            profit = usd - cost
-            margin = f" ({profit / cost * 100:+.0f}%)" if cost > 0 else ""
-            line += f"\n   закупка ${cost:g} → прибыль <b>${profit:+.2f}</b>{margin} {'✅' if profit > 0 else '❌'}"
+        rows.append(MarketRow(n, lot, usd, cost, usd - cost.usd if cost else None))
+    return rows
+
+
+def _cost_label(c: Cost) -> str:
+    if c.source == "fazer":
+        stock = "" if c.stock is None else (" (нет в наличии)" if c.stock <= 0 else f" (в наличии {c.stock})")
+        return f"FazerCards ${c.usd:g}{stock}"
+    return f"закупка ${c.usd:g}"
+
+
+def render_market(scan: MarketScan, divisor: float, costs: dict[int, Cost], note: str | None = None) -> str:
+    lines = [
+        f"🧮 <b>Выгода по рынку</b>{scan.way}",
+        f"чужих лотов просмотрено: {scan.scanned}, курс ÷{divisor:g}"
+        + (" — <b>частично</b>: Playerok ограничил запросы, нажми «🔄» позже" if scan.partial else ""),
+        "<i>самая низкая цена конкурента ÷ курс − закупка = прибыль с продажи</i>",
+    ]
+    if note:
+        lines.append(f"⚠️ {html.escape(note)}")
+    lines.append("")
+    rows = market_rows(scan, divisor, costs)
+    if not rows:
+        lines.append("Не нашёл чужих лотов с номиналом в названии.")
+    for r in rows:
+        line = (f"<b>{r.nominal}</b> · {_rub(r.lot.price)} ÷ {divisor:g} = <b>${r.usd:.2f}</b> — "
+                f'<a href="{r.lot.url}">лот</a>')
+        if r.cost is not None:
+            margin = f" ({r.profit / r.cost.usd * 100:+.0f}%)" if r.cost.usd > 0 else ""
+            line += (f"\n   {_cost_label(r.cost)} → прибыль <b>${r.profit:+.2f}</b>{margin} "
+                     f"{'✅' if r.profit > 0 else '❌'}")
         lines.append(line)
-    missing = [n for n in sorted(best) if n not in costs]
+    missing = [r.nominal for r in rows if r.cost is None]
     if missing:
-        lines += ["", f"Закупка не задана для: {', '.join(map(str, missing[:20]))} — «💵 Закупка»."]
+        lines += ["", f"Закупка не задана для: {', '.join(map(str, missing[:20]))} — «💵 Закупка» или «🎁 FazerCards»."]
     return "\n".join(lines)
+
+
+async def nominal_report(
+    client: PlayerokClient, lot_ref: str, divisor: float, pages: int = 5,
+    costs: dict | None = None, own_user_id: str | None = None,
+    on_page=None, cost_note: str | None = None,
+) -> str:
+    """Калькулятор выгоды по рынку (отчёт целиком). costs — {номинал: Cost} или {номинал: $}."""
+    norm = {n: (c if isinstance(c, Cost) else Cost(float(c), "manual")) for n, c in (costs or {}).items()}
+    scan = await market_scan(client, lot_ref, pages=pages, own_user_id=own_user_id, on_page=on_page)
+    return render_market(scan, divisor, norm, cost_note)
+
+
+async def track_market(
+    bot: Bot | None, sessions: SessionFactory, seller: Seller, client: PlayerokClient, *, force: bool = False,
+) -> list[MarketRow] | None:
+    """Трекер: раз в 30 мин пересчитывает выгоду и уведомляет, когда номинал СТАЛ выгодным
+    (прибыль ≥ порога). Повторно о том же номинале — только если он выпадал из выгодных."""
+    tg = seller.tg_id
+    async with sessions() as session:
+        if not force and await ft.get_setting(session, tg, TRACK_KEY, "0") != "1":
+            return None
+        ref = await ft.get_setting(session, tg, NOMINAL_LINK_KEY, "")
+        if not ref:
+            return None
+        now = datetime.utcnow()
+        if not force:
+            raw = await ft.get_setting(session, tg, TRACK_LAST_KEY, "")
+            try:
+                last = datetime.fromisoformat(raw) if raw else None
+            except ValueError:
+                last = None
+            if last and now - last < TRACK_EVERY:
+                return None
+        await ft.set_setting(session, tg, TRACK_LAST_KEY, now.isoformat())
+        divisor = await get_divisor(session, tg)
+        try:
+            min_profit = float(await ft.get_setting(session, tg, TRACK_MIN_KEY, "0.01"))
+        except ValueError:
+            min_profit = 0.01
+        costs, note = await load_costs(session, tg)
+        seen_raw = await ft.get_setting(session, tg, TRACK_SEEN_KEY, "")
+    if not costs:
+        return None
+    # Сканирование Playerok — вне сессии БД (может идти до минуты из-за лимита запросов).
+    scan = await market_scan(client, ref, pages=5, own_user_id=seller.playerok_id)
+    rows = market_rows(scan, divisor, costs)
+    good = [r for r in rows if r.profit is not None and r.profit >= min_profit
+            and not (r.cost and r.cost.source == "fazer" and r.cost.stock == 0)]
+    seen = {int(x) for x in seen_raw.split(",") if x.strip().isdigit()}
+    new = [r for r in good if r.nominal not in seen]
+    log.info("%s трекер рынка: выгодных %s, новых %s", tag(tg), len(good), len(new))
+    async with sessions() as session:
+        await ft.set_setting(session, tg, TRACK_SEEN_KEY, ",".join(str(r.nominal) for r in good))
+        if new and bot is not None:
+            lines = [f"🔔 <b>Стало выгодно продавать</b> (прибыль ≥ ${min_profit:g}):", ""]
+            for r in new:
+                lines.append(
+                    f"<b>{r.nominal}</b>: на Playerok от {_rub(r.lot.price)} (${r.usd:.2f}), "
+                    f"{_cost_label(r.cost)} → <b>${r.profit:+.2f}</b> — "
+                    f'<a href="{r.lot.url}">лот</a>'
+                )
+            await notify(bot, session, tg, "system", "\n".join(lines))
+    return good
