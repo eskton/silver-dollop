@@ -19,7 +19,7 @@ from .features import get_tz
 
 # Заказ считается продажей, если он оплачен и не возвращён.
 SALE_STATUSES = {"PAID", "SENT", "CONFIRMED", "COMPLETED"}
-PROBLEM_MARKERS = ("PROBLEM", "DISPUTE", "ROLLBACK", "REFUND")
+PROBLEM_MARKERS = ("PROBLEM", "DISPUTE", "ROLLBACK", "ROLLED_BACK", "REFUND")
 LOW_STOCK = 3
 
 

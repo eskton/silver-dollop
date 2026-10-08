@@ -173,9 +173,15 @@ async def main():
     STATE["deal_status"] = "COMPLETED"
     await sync_seller(bot, sessions, cipher, seller, notify=True)
     assert SENT_TO_CHAT[-1] == "Спасибо за покупку, buyer! Буду рад отзыву 😊"
+    conf = next(t for t in reversed(bot.sent) if "Подтверждение сделки для" in t)
+    assert "<b>Покупатель:</b> <a href=\"https://playerok.com/profile/buyer/products\">buyer</a>" in conf, conf
+    assert "⭐ <b>Отзыв от клиента</b> — пока нет" in conf, conf
     STATE["review"] = {"rating": 5, "text": "топ"}
     await sync_seller(bot, sessions, cipher, seller, notify=True)
     assert SENT_TO_CHAT[-1] == "Спасибо за отзыв! 🙏" and "⭐⭐⭐⭐⭐" in bot.sent[-1]
+    rev = bot.sent[-1]
+    assert "Новый отзыв для" in rev and "<b>Текст отзыва:</b> топ" in rev and "<b>Оценка:</b> 5 ⭐⭐⭐⭐⭐" in rev, rev
+    assert "Открыть заказ" in rev and "profile/buyer/products" in rev, rev
 
     # Экраны настроек рендерятся
     for f in ft.FEATURES:

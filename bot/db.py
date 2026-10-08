@@ -90,6 +90,17 @@ class AutoReply(Base):
     text: Mapped[str] = mapped_column(Text)
 
 
+class QuickReply(Base):
+    """Шаблоны быстрых ответов: кнопка «📋 Шаблоны» под уведомлением о сообщении."""
+
+    __tablename__ = "quick_replies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    title: Mapped[str] = mapped_column(String(64))
+    text: Mapped[str] = mapped_column(Text)
+
+
 class RelistRule(Base):
     """Правило отбора лотов для автовыставления: слово в названии или ссылка."""
 

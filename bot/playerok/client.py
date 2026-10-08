@@ -25,6 +25,13 @@ BASE_URL = "https://playerok.com"
 ACTIVE_SALE_STATUSES = ("PAID", "SENT")
 
 
+def profile_url(username: str) -> str:
+    """Страница пользователя Playerok (его лоты)."""
+    from urllib.parse import quote
+
+    return f"{BASE_URL}/profile/{quote(username, safe='')}/products"
+
+
 def _get(d: dict[str, Any] | None, *path: str, default: Any = None) -> Any:
     cur: Any = d or {}
     for key in path:
@@ -169,6 +176,29 @@ class ChatPreview:
 
 
 @dataclass(frozen=True)
+class ChatMessage:
+    id: str
+    text: str
+    created_at: str
+    author_id: str
+    author_username: str
+    images: int  # сколько картинок во вложении
+    event: str  # системное событие (заказ оплачен, подтверждён…), если это не обычное сообщение
+
+    @classmethod
+    def from_raw(cls, raw: dict[str, Any]) -> "ChatMessage":
+        return cls(
+            id=str(_get(raw, "id", default="")),
+            text=str(_get(raw, "text", default="") or ""),
+            created_at=str(_get(raw, "createdAt", default="") or ""),
+            author_id=str(_get(raw, "user", "id", default="") or ""),
+            author_username=str(_get(raw, "user", "username", default="") or ""),
+            images=len(_get(raw, "images", default=[]) or []),
+            event=str(_get(raw, "event", default="") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class RawResponse:
     status: int
     text: str
@@ -240,6 +270,7 @@ PERSISTED_QUERIES = {
     "items": "3f20c731f8f769a094ee3fa32e09f8e12250357e9a4f0ebb4e6988e7a0bb9260",
     "item": "1cdb4b335f6c119db77883451f41cef83fc449f79f021627f27b76ec49203487",
     "itemPriorityStatuses": "b922220c6f979537e1b99de6af8f5c13727daeff66727f679f07f986ce1c025a",
+    "chatMessages": "9b4e264ff1b20e0fd3929afe023dee8f50affc02b85f80cb4b3dc1516ecfbaa0",
 }
 
 HEADERS = {
@@ -578,6 +609,10 @@ class PlayerokClient:
         """Продавец отмечает заказ выполненным (выдан)."""
         await self.update_deal_status(deal_id, "SENT")
 
+    async def refund_deal(self, deal_id: str) -> None:
+        """Возврат денег покупателю (как PlayerokAPI.update_deal(…, ROLLED_BACK))."""
+        await self.update_deal_status(deal_id, "ROLLED_BACK")
+
     # ----- лоты -----
 
     async def my_items(
@@ -849,6 +884,23 @@ class PlayerokClient:
         )
         edges = _get(data, "chats", "edges", default=[]) or []
         return [ChatPreview.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+
+    async def chat_messages(self, chat_id: str, count: int = 24) -> list[ChatMessage]:
+        """Последние сообщения чата (как PlayerokAPI.get_chat_messages, не больше 24),
+        от старых к новым."""
+        data = await self._gql(
+            "chatMessages",
+            "persisted:" + PERSISTED_QUERIES["chatMessages"],
+            {
+                "pagination": {"first": min(24, count), "after": None},
+                "filter": {"chatId": chat_id},
+                "hasSupportAccess": False,
+                "showForbiddenImage": True,
+            },
+        )
+        edges = _get(data, "chatMessages", "edges", default=[]) or []
+        msgs = [ChatMessage.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+        return sorted(msgs, key=lambda m: m.created_at)
 
     async def mark_chat_read(self, chat_id: str) -> None:
         await self._gql("markChatAsRead", q.MARK_CHAT_AS_READ, {"input": {"chatId": chat_id}})

@@ -18,6 +18,7 @@ from ..logs import tag
 from ..playerok import AuthRequired, ChatPreview, Deal, PlayerokClient, PlayerokError
 from ..playerok.client import ACTIVE_SALE_STATUSES
 from . import automation, notifications, pricing
+from .notifications import buyer_link
 from .sellers import disconnect_seller
 
 log = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ async def sync_seller(
                     await notifications.notify(
                         bot, session, seller.tg_id, "deal",
                         _format_deal(deal, account, number),
-                        reply_markup=deal_kb(deal.chat_id, deal.item_id),
+                        reply_markup=deal_kb(deal.chat_id, deal.item_id, deal_id=deal.id),
                     )
         await automation.process_deals(bot, sessions, seller, client, deals, act=notify)
 
@@ -109,7 +110,8 @@ async def sync_seller(
             if is_new and notify:
                 async with sessions() as session:
                     await notifications.notify(
-                        bot, session, seller.tg_id, "message", _format_message(chat),
+                        bot, session, seller.tg_id, "message",
+                        _format_message(chat, seller.playerok_username or "—"),
                         reply_markup=deal_kb(chat.id),
                     )
         await automation.process_chats(
@@ -176,17 +178,19 @@ def _format_deal(deal: Deal, account: str, number: int) -> str:
     ]
     if deal.chat_id:
         lines.append(f"<b>Ссылка на чат:</b> {_link(deal.chat_url, 'Открыть чат')}")
-    lines.append(f"<b>Аккаунт покупателя:</b> {html.escape(deal.buyer_username)}")
+    lines.append(f"<b>Аккаунт покупателя:</b> {buyer_link(deal.buyer_username)}")
     return "\n".join(lines)
 
 
-def _format_message(chat: ChatPreview) -> str:
+def _format_message(chat: ChatPreview, account: str = "—") -> str:
+    """Как в Easy Sell: от кого, текст, ссылка на чат."""
     text = chat.last_text.strip() or "(без текста)"
     if len(text) > 1500:
         text = text[:1500] + "…"
     chat_url = f"https://playerok.com/chats/{chat.id}"
     return (
-        f"✉️ <b>Новое сообщение от {html.escape(chat.last_author_username)}</b>\n\n"
+        f"✉️ <b>Новое сообщение от клиента для {html.escape(account)}</b>\n\n"
+        f"<b>Аккаунт покупателя:</b> {buyer_link(chat.last_author_username)}\n\n"
         f"{html.escape(text)}\n\n"
         f"<b>Ссылка на чат:</b> {_link(chat_url, 'Открыть чат')}"
     )

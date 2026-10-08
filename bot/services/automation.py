@@ -32,13 +32,14 @@ from ..logs import tag
 from . import features as ft
 from ..plugins.giftcard import service as giftcard_svc
 from ..plugins.stars import service as stars_svc
-from .notifications import notify
+from ..keyboards import deal_kb
+from .notifications import buyer_link, notify
 
 log = logging.getLogger(__name__)
 
 BUYER_CONFIRMED = ("CONFIRMED", "COMPLETED")
-PROBLEM_MARKERS = ("PROBLEM", "DISPUTE", "ROLLBACK", "REFUND")
-REFUND_MARKERS = ("ROLLBACK", "REFUND")
+PROBLEM_MARKERS = ("PROBLEM", "DISPUTE", "ROLLBACK", "ROLLED_BACK", "REFUND")
+REFUND_MARKERS = ("ROLLBACK", "ROLLED_BACK", "REFUND")
 RELIST_STATUSES = ("SOLD", "EXPIRED")
 SOLD_DEAL_STATUSES = ("PAID", "SENT", "CONFIRMED", "COMPLETED")
 ITEMS_CHECK_EVERY = timedelta(minutes=10)
@@ -232,20 +233,23 @@ async def _process_deal(
         state.confirmed_at = state.confirmed_at or now
         if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["after_buyer_confirm"]):
             await _say(client, deal.chat_id, await _tpl(session, seller, "after_buyer_confirm", deal))
-        review = ""
         if deal.review_rating is not None:
             stars = "⭐" * max(1, min(5, deal.review_rating))
-            txt = f"\n<b>Текст отзыва:</b> {html.escape(deal.review_text)}" if deal.review_text else ""
-            review = f"\n<b>Отзыв от клиента — есть</b>{txt}\n<b>Оценка:</b> {deal.review_rating} {stars}"
+            review = (
+                "⭐ <b>Отзыв от клиента</b> — есть\n"
+                f"<b>Текст отзыва:</b> {html.escape(deal.review_text) or '—'}\n"
+                f"<b>Оценка:</b> {deal.review_rating} {stars}"
+            )
         else:
-            review = "\n<b>Отзыв от клиента</b> — пока нет"
+            review = "⭐ <b>Отзыв от клиента</b> — пока нет"
         await notify(
             bot, session, tg, "confirmed",
             f"✅ <b>Подтверждение сделки для {html.escape(seller.playerok_username or '—')}</b>\n\n"
-            f"<b>Товар:</b> {_link(deal.item_url, html.escape(deal.item_name))}\n\n"
+            f"<b>Товар:</b> {_link(deal.item_url, html.escape(deal.item_name))}\n"
             f"<b>Заказ:</b> {_link(deal.deal_url, 'Открыть заказ')}\n"
-            f"<b>Покупатель:</b> {html.escape(deal.buyer_username)}\n"
+            f"<b>Покупатель:</b> {buyer_link(deal.buyer_username)}\n\n"
             f"{review}",
+            reply_markup=deal_kb(deal.chat_id, actions=False),
         )
 
     # --- проблема / спор ---
@@ -257,7 +261,9 @@ async def _process_deal(
         await notify(
             bot, session, tg, "refund" if refund else "problem",
             f"{title} по заказу «{html.escape(deal.item_name)}» "
-            f"(покупатель {html.escape(deal.buyer_username)}), статус {html.escape(cur)}.\n{deal.deal_url}",
+            f"(покупатель {buyer_link(deal.buyer_username)}), статус {html.escape(cur)}.\n"
+            f"<b>Заказ:</b> {_link(deal.deal_url, 'Открыть заказ')}",
+            reply_markup=deal_kb(deal.chat_id, actions=False),
         )
 
     # --- отзыв ---
@@ -268,13 +274,14 @@ async def _process_deal(
             kind = "review_good" if deal.review_rating >= 4 else "review_bad"
             await _say(client, deal.chat_id, await _tpl(session, seller, kind, deal))
         stars = "⭐" * max(1, min(5, deal.review_rating))
-        body = f"\n<b>Текст отзыва:</b> {html.escape(deal.review_text)}" if deal.review_text else "\n<b>Текст отзыва:</b>"
         await notify(
             bot, session, tg, "review",
             f"⭐ <b>Новый отзыв для {html.escape(seller.playerok_username or '—')}</b>\n\n"
             f"<b>Ссылка на заказ:</b> {_link(deal.deal_url, 'Открыть заказ')}\n"
-            f"<b>Аккаунт покупателя:</b> {html.escape(deal.buyer_username)}\n"
-            f"{body}\n<b>Оценка:</b> {deal.review_rating} {stars}",
+            f"<b>Аккаунт покупателя:</b> {buyer_link(deal.buyer_username)}\n\n"
+            f"<b>Текст отзыва:</b> {html.escape(deal.review_text) or '—'}\n"
+            f"<b>Оценка:</b> {deal.review_rating} {stars}",
+            reply_markup=deal_kb(deal.chat_id, actions=False),
         )
 
     # --- напоминания ---

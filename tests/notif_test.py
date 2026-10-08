@@ -20,7 +20,9 @@ async def main():
     assert '<a href="https://playerok.com/deal/d1">Открыть заказ</a>' in txt
     assert '<a href="https://playerok.com/chats/c1">Открыть чат</a>' in txt
     chat = ChatPreview(id="c9", unread=1, last_message_id="m1", last_text="привет", last_author_id="b1", last_author_username="Максим Ж.", created_at="")
-    mt = _format_message(chat); print(mt)
-    assert "Новое сообщение от Максим Ж." in mt and "Открыть чат" in mt
+    mt = _format_message(chat, "eskton"); print(mt)
+    assert "Новое сообщение от клиента для eskton" in mt and "Открыть чат" in mt
+    assert '<a href="https://playerok.com/profile/%D0%9C%D0%B0%D0%BA%D1%81%D0%B8%D0%BC%20%D0%96./products">Максим Ж.</a>' in mt, mt
+    assert '<a href="https://playerok.com/profile/Malisonlif/products">Malisonlif</a>' in txt
     print("OK")
 asyncio.run(main())

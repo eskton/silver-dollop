@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from dataclasses import dataclass
 
@@ -12,6 +13,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..playerok.client import profile_url
 from . import features as ft
 
 log = logging.getLogger(__name__)
@@ -52,6 +54,13 @@ async def toggle(session: AsyncSession, tg_id: int, kind: str, what: str) -> Non
         await ft.set_setting(session, tg_id, f"n_{kind}_on", "0" if on else "1")
     elif what == "sound":
         await ft.set_setting(session, tg_id, f"n_{kind}_sound", "0" if sound else "1")
+
+
+def buyer_link(username: str) -> str:
+    """Ник покупателя ссылкой на его профиль Playerok (как в Easy Sell)."""
+    if not username or username in ("покупатель", "Поддержка"):
+        return html.escape(username or "—")
+    return f'<a href="{html.escape(profile_url(username), quote=True)}">{html.escape(username)}</a>'
 
 
 async def notify(
