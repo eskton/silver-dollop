@@ -143,7 +143,12 @@ async def check_rule(
     if new_raw >= raw:
         why = f"на минимуме {_rub(rule.min_price)}" if at_min else "снижать некуда"
         return f"{why}: моя {_rub(price)}, у конкурента {_rub(best.price)} — {_who(best)}", False
-    answer = await client.update_item_price(item.id, new_raw)
+    try:
+        answer = await client.update_item_price(item.id, new_raw)
+    except AuthRequired:
+        raise
+    except PlayerokError as e:
+        return f"{price_error(str(e))}; моя {_rub(price)}, у конкурента {_rub(best.price)} — {_who(best)}", False
     # Проверяем, что Playerok действительно поменял цену, а не просто ответил «ок».
     after = await client.get_item(item.id)
     status = str(answer.get("status") or after.status or "")
@@ -276,6 +281,7 @@ def parse_cut(text: str) -> Cut | None:
 
 _MIN_PRICE_RE = _re_mod.compile(r"minimal price\D*(\d+(?:[.,]\d+)?)", _re_mod.I)
 _AT_LEAST_RE = _re_mod.compile(r"price must be at least\D*(\d+(?:[.,]\d+)?)", _re_mod.I)
+_MIN_DISCOUNT_RE = _re_mod.compile(r"minimal discount[^\d\[]*(\d+(?:[.,]\d+)?)?\s*(%)?", _re_mod.I)
 
 
 def price_error(text: str) -> str:
@@ -283,7 +289,13 @@ def price_error(text: str) -> str:
     m = _MIN_PRICE_RE.search(text) or _AT_LEAST_RE.search(text)
     if m:
         return f"Playerok не даёт цену ниже {m.group(1)} ₽ для этого лота"
-    return f"ошибка: {text[:200]}"
+    m = _MIN_DISCOUNT_RE.search(text)
+    if m:
+        size = f"{m.group(1)}{'%' if m.group(2) else ''}" if m.group(1) else "размер Playerok не сообщил"
+        details = f" Подробности от Playerok: {text[text.index('['):]}" if "[" in text else ""
+        return (f"Playerok не даёт снизить цену так мало — нужна скидка больше (минимальная скидка: {size}). "
+                f"Снизь сильнее.{details}")
+    return f"ошибка: {text[:300]}"
 
 
 async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str, bool]:

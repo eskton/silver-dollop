@@ -26,6 +26,7 @@ RIVALS = []
 UPDATES = []
 PRICE_IN_ANSWER = {"on": False}
 MIN_RAW = {"v": 0}
+MIN_DISCOUNT = {"on": False}
 async def pk(body, token):
     op, v = body["operationName"], body["variables"]
     if op == "items":
@@ -36,6 +37,10 @@ async def pk(body, token):
     if op == "item":
         return RawResponse(200, json.dumps({"data": {"item": MINE[v["id"]]}}), None)
     if op == "updateItem":
+        cur = MINE[v["input"]["id"]]["rawPrice"]
+        if MIN_DISCOUNT["on"] and v["input"]["price"] > cur * 0.95:  # как у Playerok: «Minimal discount -»
+            return RawResponse(200, json.dumps({"errors": [{"message": "Minimal discount - ",
+                "extensions": {"code": "BAD_USER_INPUT", "minDiscount": 5}}]}), None)
         if v["input"]["price"] < MIN_RAW["v"]:
             return RawResponse(200, json.dumps({"errors": [{"message": f"Minimal price - {MIN_RAW['v']}"}]}), None)
         UPDATES.append(v["input"])
@@ -179,5 +184,16 @@ async def main():
     assert "Снижено: 1 из 2" in final and "684 ₽ → 682" in final and "Playerok не даёт цену ниже 620 ₽" in final, final
     assert len(UPDATES) == n + 1
     print("6. «682» ставит цену; ошибка Playerok по-русски:", final.replace("\n", " | "))
+
+    # --- скриншот 2: «Minimal discount -» без числа — по-русски и с подробностями из extensions ---
+    MIN_DISCOUNT["on"], MIN_RAW["v"] = True, 0
+    MINE["my2"].update(price=684, rawPrice=622)
+    n = len(UPDATES)
+    note, ok = await pricing.cut_price(PlayerokClient("T"), "my2", pricing.Cut("set", 682))
+    assert not ok and len(UPDATES) == n, note
+    assert "не даёт снизить цену так мало" in note and '"minDiscount": 5' in note, note
+    note, ok = await pricing.cut_price(PlayerokClient("T"), "my2", pricing.Cut("pct", 10))
+    assert ok and note.startswith("684 ₽ → 61"), note  # сильнее — проходит
+    print("7. «Minimal discount»:", note)
     print("OK")
 asyncio.run(main())

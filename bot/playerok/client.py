@@ -273,6 +273,20 @@ PERSISTED_QUERIES = {
     "chatMessages": "9b4e264ff1b20e0fd3929afe023dee8f50affc02b85f80cb4b3dc1516ecfbaa0",
 }
 
+# Операции с лотами/сделками: при ошибке пишем в лог весь ответ и добавляем в текст
+# подробности из extensions (переписку сюда не включаем — createChatMessage не в списке).
+DETAILED_ERROR_OPS = {"updateItem", "publishItem", "increaseItemPriorityStatus", "updateDeal"}
+_SKIP_EXT = {"code", "stacktrace", "exception", "serviceName", "locations", "path"}
+
+
+def error_details(error: dict[str, Any]) -> str:
+    """Поля ошибки GraphQL кроме message/служебных — коротко, для продавца и разработчика."""
+    ext = error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
+    extra = {k: v for k, v in ext.items() if k not in _SKIP_EXT}
+    extra.update({k: v for k, v in error.items() if k not in ("message", "extensions", "locations", "path")})
+    return json.dumps(extra, ensure_ascii=False)[:300] if extra else ""
+
+
 HEADERS = {
     "Accept": "*/*",
     "Content-Type": "application/json",
@@ -526,6 +540,13 @@ class PlayerokClient:
                     REMOVED_FIELDS.setdefault(operation, []).append(field)
                     PATCHED_QUERIES[operation] = patched
                     return await self._gql(operation, patched, variables, _retries=_retries + 1)
+            if operation in DETAILED_ERROR_OPS:
+                # Полный текст ошибки — в лог: у Playerok бывают обрезанные сообщения
+                # («Minimal discount -» без числа), подробности могут быть в extensions.
+                log.warning("Playerok %s: ошибка %s", operation, json.dumps(errors, ensure_ascii=False)[:1000])
+                details = error_details(first)
+                if details:
+                    message = f"{message} [{details}]"
             raise PlayerokError(message)
 
         # После входа сайт отдаёт токен сессии в Set-Cookie.
