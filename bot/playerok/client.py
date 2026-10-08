@@ -605,39 +605,59 @@ class PlayerokClient:
                 break
         return result
 
+    # Сортировка/поиск в сохранённом запросе `items` вживую не подтверждены: если Playerok
+    # ругнётся на них — отключаем до перезапуска и работаем без них.
+    _sort_ok = True
+    _search_ok = True
+
     async def category_items(
         self, category_id: str, pages: int = 5, obtaining_type_id: str | None = None,
-        on_page: Any = None,
+        on_page: Any = None, search: str | None = None, sort_price: bool = False,
     ) -> list[Item]:
         """Лоты всех продавцов в категории (как PlayerokAPI.get_items), только APPROVED.
         obtaining_type_id — только с этим способом получения (код / по нику и т.п.).
+        search — текст поиска (filter.searchQuery), sort_price — сначала дешёвые
+        (sort {field: price, direction: ASC}). self.last_sorted — пришли ли цены по возрастанию.
         Если Playerok начал отказывать на 2-й и дальше странице — возвращает собранное
         (self.partial = True), а не теряет всё."""
         result: list[Item] = []
         after: str | None = None
         self.partial = False
+        self.last_sorted = False
         filt: dict[str, Any] = {"gameCategoryId": category_id, "status": ["APPROVED"]}
         if obtaining_type_id:
             filt["obtainingTypeId"] = obtaining_type_id
+        if search and PlayerokClient._search_ok:
+            filt["searchQuery"] = search
+        use_sort = sort_price and PlayerokClient._sort_ok
         for page_no in range(1, pages + 1):
+            variables: dict[str, Any] = {"pagination": {"first": 24, "after": after}, "filter": filt}
+            if use_sort:
+                variables["sort"] = {"field": "price", "direction": "ASC"}
             try:
-                data = await self._gql(
-                    "items",
-                    "persisted:" + PERSISTED_QUERIES["items"],
-                    {
-                        "pagination": {"first": 24, "after": after},
-                        "filter": filt,
-                    },
-                )
-            except PlayerokError:
+                data = await self._gql("items", "persisted:" + PERSISTED_QUERIES["items"], variables)
+            except PlayerokError as e:
+                msg = str(e).lower()
+                if page_no == 1 and use_sort and "sort" in msg:
+                    log.warning("Playerok: сортировка лотов не принята (%s) — без неё", e)
+                    PlayerokClient._sort_ok = False
+                    return await self.category_items(category_id, pages, obtaining_type_id, on_page, search, False)
+                if page_no == 1 and "searchquery" in msg:
+                    log.warning("Playerok: поиск лотов не принят (%s) — без него", e)
+                    PlayerokClient._search_ok = False
+                    return await self.category_items(category_id, pages, obtaining_type_id, on_page, None, sort_price)
                 if not result:
                     raise
                 self.partial = True
                 break
-            if on_page is not None:
-                await on_page(page_no, pages, len(result) + len(_get(data, "items", "edges", default=[]) or []))
             edges = _get(data, "items", "edges", default=[]) or []
-            result += [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+            page_items = [Item.from_raw(e.get("node") or {}) for e in edges if isinstance(e, dict)]
+            if page_no == 1:
+                prices = [i.price for i in page_items if isinstance(i.price, (int, float))]
+                self.last_sorted = len(prices) >= 3 and all(a <= b for a, b in zip(prices, prices[1:]))
+            result += page_items
+            if on_page is not None:
+                await on_page(page_no, pages, len(result))
             page = _get(data, "items", "pageInfo", default={}) or {}
             after = page.get("endCursor")
             if not edges or not page.get("hasNextPage") or not after:

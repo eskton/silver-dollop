@@ -206,7 +206,7 @@ async def run_now(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCiph
 # ----- цены по номиналам -----
 
 
-NOMINAL_TIMEOUT = 180  # секунд на весь отчёт
+NOMINAL_TIMEOUT = 300  # секунд на весь отчёт (по запросу на номинал, лимит ~12/мин)
 _NOMINAL_RUNNING: set[int] = set()
 
 
@@ -306,12 +306,15 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
     async def on_wait(note: str) -> None:
         await show(f"🔎 Собираю цены конкурентов… ⏳ {note}", force=True)
 
+    async def on_step(note: str) -> None:
+        await show(f"🔎 Ищу самые дешёвые лоты… {note}")
+
     try:
         async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
             client.on_wait = on_wait
             text = await asyncio.wait_for(
                 pricing.nominal_report(client, ref, divisor, costs=costs, cost_note=cost_note,
-                                       own_user_id=seller.playerok_id, on_page=on_page),
+                                       own_user_id=seller.playerok_id, on_page=on_page, on_step=on_step),
                 timeout=NOMINAL_TIMEOUT,
             )
     except asyncio.TimeoutError:

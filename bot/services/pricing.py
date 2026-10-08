@@ -279,9 +279,14 @@ async def load_costs(session, tg: int) -> tuple[dict[int, Cost], str | None]:
 
 async def market_scan(
     client: PlayerokClient, lot_ref: str, pages: int = 5, own_user_id: str | None = None, on_page=None,
+    targets: list[int] | None = None, on_step=None,
 ) -> MarketScan:
     """Самый дешёвый ЧУЖОЙ лот каждого номинала в категории (и способе получения) лота lot_ref.
-    pages по 24 лота — Playerok ограничивает частоту запросов, поэтому немного."""
+
+    targets — номиналы, которые нужны (из закупки): для каждого отдельный поиск по числу
+    с сортировкой «сначала дешёвые» — так находится настоящий минимум, а не минимум среди
+    первых страниц каталога. Если Playerok не сортирует — листаем выдачу поиска до 8 страниц.
+    Без targets (или если поиск ничего не дал) — просмотр каталога подряд."""
     ref = lot_ref.strip()
     slug = ref.split("/products/", 1)[1].split("?")[0].strip("/") if "/products/" in ref else ref
     try:
@@ -290,31 +295,75 @@ async def market_scan(
         raise PlayerokError(f"лот по ссылке: {e}") from e
     if not item.category_id:
         raise PlayerokError("Playerok не отдал категорию этого лота")
-    try:
-        lots = await client.category_items(item.category_id, pages=pages,
-                                           obtaining_type_id=item.obtaining_type_id or None, on_page=on_page)
-    except PlayerokError as e:
-        if not item.obtaining_type_id:
-            raise PlayerokError(f"лоты категории: {e}") from e
-        # Фильтр по способу получения мог не понравиться серверу — без него, фильтруем сами.
-        log.info("выгода по рынку: без фильтра obtainingTypeId после ошибки: %s", e)
+    way_id = item.obtaining_type_id or None
+    filt_way = [way_id]  # фильтр по способу получения на стороне Playerok (можно отключить)
+
+    def suitable(o: Item) -> bool:
+        return (
+            (not way_id or not o.obtaining_type_id or o.obtaining_type_id == way_id)
+            and (not own_user_id or o.user_id != own_user_id)  # только чужие
+            and isinstance(o.price, (int, float)) and o.price > 0
+        )
+
+    async def fetch(**kw) -> list[Item]:
         try:
-            lots = await client.category_items(item.category_id, pages=pages, on_page=on_page)
-        except PlayerokError as e2:
-            raise PlayerokError(f"лоты категории: {e2}") from e2
-    partial = getattr(client, "partial", False)
-    if item.obtaining_type_id:
-        lots = [o for o in lots if not o.obtaining_type_id or o.obtaining_type_id == item.obtaining_type_id]
-    lots = [o for o in lots if not own_user_id or o.user_id != own_user_id]  # только чужие
+            return await client.category_items(item.category_id, obtaining_type_id=filt_way[0], **kw)
+        except PlayerokError as e:
+            if not filt_way[0]:
+                raise
+            # Фильтр по способу получения мог не понравиться серверу — без него, фильтруем сами.
+            log.info("выгода по рынку: без фильтра obtainingTypeId после ошибки: %s", e)
+            filt_way[0] = None
+            return await client.category_items(item.category_id, **kw)
+
     best: dict[int, Item] = {}
-    for o in lots:
-        n = nominal_of(o.name)
-        if n is None or not isinstance(o.price, (int, float)) or o.price <= 0:
-            continue
-        if n not in best or o.price < best[n].price:
-            best[n] = o
+    scanned = 0
+    partial = False
+    hits = 0
+    if targets:
+        per_nominal_pages = 1
+        # С самого большого номинала: по нему надёжнее видно, сработал ли поиск
+        # («50» есть и в «500», и в «4500», а «4500» в случайной выдаче встречается редко).
+        targets = sorted(targets, reverse=True)
+        for i, n in enumerate(targets[:20], 1):
+            if on_step is not None:
+                await on_step(f"номинал {n} ({i}/{min(len(targets), 20)})")
+            try:
+                lots = await fetch(pages=per_nominal_pages, search=str(n), sort_price=True)
+                if i == 1 and len(lots) >= 6 and sum(str(n) in o.name for o in lots) < len(lots) / 2:
+                    # Поиск по тексту не применился (в выдаче что попало) — смотрим каталог подряд.
+                    log.info("выгода по рынку: поиск по номиналу не работает — просмотр каталога")
+                    hits = 0
+                    break
+                if per_nominal_pages == 1 and not client.last_sorted and len(lots) >= 24:
+                    # Playerok не отсортировал — листаем выдачу поиска до конца (до 8 страниц).
+                    per_nominal_pages = 8
+                    lots = await fetch(pages=8, search=str(n), sort_price=True)
+            except PlayerokError as e:
+                if i == 1:
+                    raise PlayerokError(f"лоты категории: {e}") from e
+                partial = True  # лимит/сбой посреди поиска — показываем найденное
+                break
+            partial = partial or getattr(client, "partial", False)
+            scanned += len(lots)
+            same = [o for o in lots if suitable(o) and nominal_of(o.name) == n]
+            if same:
+                hits += 1
+                best[n] = min(same, key=lambda o: o.price)
+    if not targets or hits == 0:
+        try:
+            lots = await fetch(pages=max(pages, 15) if targets else pages, on_page=on_page, sort_price=True)
+        except PlayerokError as e:
+            raise PlayerokError(f"лоты категории: {e}") from e
+        partial = getattr(client, "partial", False)
+        lots = [o for o in lots if suitable(o)]
+        scanned = len(lots)
+        for o in lots:
+            n = nominal_of(o.name)
+            if n is not None and (n not in best or o.price < best[n].price):
+                best[n] = o
     way = f" · {html.escape(item.obtaining_type_name)}" if item.obtaining_type_name else ""
-    return MarketScan(best, len(lots), partial, way)
+    return MarketScan(best, scanned, partial, way)
 
 
 def market_rows(scan: MarketScan, divisor: float, costs: dict[int, Cost]) -> list[MarketRow]:
@@ -337,7 +386,7 @@ def _cost_label(c: Cost) -> str:
 def render_market(scan: MarketScan, divisor: float, costs: dict[int, Cost], note: str | None = None) -> str:
     lines = [
         f"🧮 <b>Выгода по рынку</b>{scan.way}",
-        f"чужих лотов просмотрено: {scan.scanned}, курс ÷{divisor:g}"
+        f"просмотрено лотов: {scan.scanned}, курс ÷{divisor:g}"
         + (" — <b>частично</b>: Playerok ограничил запросы, нажми «🔄» позже" if scan.partial else ""),
         "<i>самая низкая цена конкурента ÷ курс − закупка = прибыль с продажи</i>",
     ]
@@ -364,11 +413,12 @@ def render_market(scan: MarketScan, divisor: float, costs: dict[int, Cost], note
 async def nominal_report(
     client: PlayerokClient, lot_ref: str, divisor: float, pages: int = 5,
     costs: dict | None = None, own_user_id: str | None = None,
-    on_page=None, cost_note: str | None = None,
+    on_page=None, cost_note: str | None = None, on_step=None,
 ) -> str:
     """Калькулятор выгоды по рынку (отчёт целиком). costs — {номинал: Cost} или {номинал: $}."""
     norm = {n: (c if isinstance(c, Cost) else Cost(float(c), "manual")) for n, c in (costs or {}).items()}
-    scan = await market_scan(client, lot_ref, pages=pages, own_user_id=own_user_id, on_page=on_page)
+    scan = await market_scan(client, lot_ref, pages=pages, own_user_id=own_user_id, on_page=on_page,
+                             targets=sorted(norm) or None, on_step=on_step)
     return render_market(scan, divisor, norm, cost_note)
 
 
@@ -404,7 +454,7 @@ async def track_market(
     if not costs:
         return None
     # Сканирование Playerok — вне сессии БД (может идти до минуты из-за лимита запросов).
-    scan = await market_scan(client, ref, pages=5, own_user_id=seller.playerok_id)
+    scan = await market_scan(client, ref, pages=5, own_user_id=seller.playerok_id, targets=sorted(costs))
     rows = market_rows(scan, divisor, costs)
     good = [r for r in rows if r.profit is not None and r.profit >= min_profit
             and not (r.cost and r.cost.source == "fazer" and r.cost.stock == 0)]
