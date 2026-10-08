@@ -54,6 +54,33 @@ def kw_match(keyword: str, name: str) -> bool:
     return bool(words)
 
 
+NAME_KW = "*"  # competitor_kw: сравнивать с лотами, похожими на название своего лота
+
+
+def name_match(my_name: str, other: str) -> bool:
+    """Чужой лот похож на свой по названию. Числа (номинал) — все и целым словом
+    (100 ≠ 1000); если чисел нет — совпадает хотя бы половина слов (по началу слова).
+    Категория и способ получения уже отфильтрованы запросом."""
+    tokens = _norm(my_name).split()
+    nums = [w for w in tokens if w.isdigit()]
+    words = [w[:5] for w in tokens if not w.isdigit() and len(w) >= 3]
+    o = _norm(other)
+    o_tokens = o.split()
+    if any(n not in o_tokens for n in nums):
+        return False
+    if nums:
+        return True
+    if not words:
+        return False
+    return sum(w in o for w in words) * 2 >= len(words)
+
+
+def kw_label(rule: PriceRule) -> str:
+    if rule.competitor_kw == NAME_KW:
+        return "похожими по названию моего лота"
+    return f"«{rule.competitor_kw}»"
+
+
 def find_my_lot(items: list[Item], rule: PriceRule) -> Item | None:
     key = rule.lot_key.strip()
     for it in items:
@@ -97,11 +124,12 @@ async def check_rule(
         and (not item.obtaining_type_id or not o.obtaining_type_id or o.obtaining_type_id == item.obtaining_type_id)
         and o.user_id != (seller.playerok_id or "")
         and isinstance(o.price, (int, float)) and o.price > 0
-        and kw_match(rule.competitor_kw, o.name)
+        and (name_match(item.name or mine.name, o.name) if rule.competitor_kw == NAME_KW
+             else kw_match(rule.competitor_kw, o.name))
     ]
     way = f" ({item.obtaining_type_name})" if item.obtaining_type_name else ""
     if not rivals:
-        return f"конкурентов «{rule.competitor_kw}»{way} не найдено, цена {_rub(price)}", False
+        return f"конкурентов ({kw_label(rule)}){way} не найдено, цена {_rub(price)}", False
     best = min(rivals, key=lambda o: o.price)
     at_min = best.price - rule.step < rule.min_price
     target = max(best.price - rule.step, rule.min_price)
@@ -172,6 +200,85 @@ async def run(
                              f"📉 «{html.escape(rule.lot_key[:60])}»: {html.escape(note)}")
         await session.commit()
         return results
+
+
+# ===================== разовое снижение цены своих лотов =====================
+
+MAX_CUT_LOTS = 30
+
+
+def select_my_lots(items: list[Item], query: str) -> list[Item]:
+    """Свои лоты по ссылке, точному названию или ключевым словам."""
+    q = query.strip()
+    if "/products/" in q:
+        slug = q.split("/products/", 1)[1].split("?")[0].strip("/")
+        return [it for it in items if slug in (it.slug, it.id)]
+    exact = [it for it in items if _norm(it.name) == _norm(q)]
+    return exact or [it for it in items if kw_match(q, it.name)]
+
+
+@dataclass(frozen=True)
+class Cut:
+    kind: str  # rub — на N ₽, pct — на N %, set — поставить N ₽
+    value: float
+
+    def target(self, price: float) -> float:
+        if self.kind == "pct":
+            return price * (1 - self.value / 100)
+        if self.kind == "set":
+            return self.value
+        return price - self.value
+
+    def label(self) -> str:
+        if self.kind == "pct":
+            return f"на {self.value:g}%"
+        if self.kind == "set":
+            return f"до {_rub(self.value)}"
+        return f"на {_rub(self.value)}"
+
+
+def parse_cut(text: str) -> Cut | None:
+    """«10» / «-10» / «10₽» — на 10 ₽, «5%» — на 5 %, «=99» — поставить 99 ₽."""
+    s = text.strip().replace(" ", "").replace(",", ".").lower().rstrip("₽рруб.")
+    kind = "rub"
+    if s.startswith("="):
+        kind, s = "set", s[1:]
+    elif s.endswith("%"):
+        kind, s = "pct", s[:-1]
+    s = s.lstrip("-−")
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if v <= 0 or (kind == "pct" and v >= 100):
+        return None
+    return Cut(kind, v)
+
+
+async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str, bool]:
+    """Снижает цену одного своего лота. (пометка, изменили ли цену). Цены — для покупателя."""
+    item = await client.get_item(item_id)
+    price, raw = item.price, item.raw_price
+    if not isinstance(price, (int, float)) or not isinstance(raw, (int, float)) or price <= 0 or raw <= 0:
+        return "Playerok не отдал цену лота", False
+    target = round(cut.target(price), 2)
+    if target >= price:
+        return f"уже {_rub(price)} — не дороже", False
+    k = price / raw  # множитель комиссии площадки
+    new_raw = max(1, math.floor(target / k + 1e-6))  # 1e-6 — от ошибок округления (99/1.1 = 89.999…)
+    if new_raw >= raw:
+        return f"{_rub(price)} — снижать некуда", False
+    answer = await client.update_item_price(item.id, new_raw)
+    after = answer.get("price")
+    if not isinstance(after, (int, float)):
+        after = (await client.get_item(item.id)).price
+    status = str(answer.get("status") or "")
+    if not isinstance(after, (int, float)) or after >= price:
+        return f"Playerok принял запрос, но цена осталась {_rub(price)} (статус {status or '?'})", False
+    note = f"{_rub(price)} → {_rub(after)}"
+    if status and status.upper() not in ("APPROVED", "ACTIVE"):
+        note += f" (статус лота: {status})"
+    return note, True
 
 
 # ===================== цены по номиналам =====================

@@ -19,6 +19,7 @@ from ..keyboards import cancel_kb, is_cancel, main_menu
 from ..playerok import AuthRequired, PlayerokClient, PlayerokError
 from ..services import features as ft
 from ..services import pricing
+from ..logs import tag
 from ..services.sellers import get_or_create_seller
 
 router = Router(name="pricing")
@@ -43,6 +44,12 @@ class AddPriceRule(StatesGroup):
     competitor = State()
     step = State()
     minimum = State()
+
+
+class CutPrice(StatesGroup):
+    lots = State()
+    amount = State()
+    confirm = State()
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
@@ -78,7 +85,7 @@ async def render_dumping(
     for r in rules:
         lines.append(
             f"• <b>{html.escape(r.lot_key[:60])}</b>\n"
-            f"   сравниваю с «{html.escape(r.competitor_kw)}», шаг {r.step:g} ₽, минимум {r.min_price:g} ₽"
+            f"   сравниваю с {html.escape(pricing.kw_label(r))}, шаг {r.step:g} ₽, минимум {r.min_price:g} ₽"
             + (f"\n   <i>{html.escape(r.last_note)}</i>" if r.last_note else "")
         )
     if not rules:
@@ -88,6 +95,7 @@ async def render_dumping(
         [_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")],
         [_btn(f"⏱ Проверять раз в {interval} мин", f"f:{feature.key}:p:dumping_interval_min")],
         [_btn("➕ Добавить лот", "dp:add"), _btn("▶️ Проверить сейчас", "dp:run")],
+        [_btn("✂️ Снизить цену своих лотов сейчас", "dp:cut")],
     ]
     rows += [[_btn(f"🗑 {r.lot_key[:30]}", f"dp:del:{r.id}")] for r in rules]
     rows.append([_btn("‹ Назад", "st")])
@@ -117,17 +125,42 @@ async def add_lot(message: Message, state: FSMContext) -> None:
     await state.update_data(lot=key[:255])
     await state.set_state(AddPriceRule.competitor)
     await message.answer(
-        "Шаг 2/4. <b>С какими лотами конкурентов сравнивать?</b> Ключевые слова, которые есть "
-        "в их названиях, например <code>100 робукс</code>.\n"
-        "Числа сравниваются целиком (100 ≠ 1000), слова — по началу («робукс» = «робуксов»)."
+        "Шаг 2/4. <b>С какими лотами конкурентов сравнивать?</b>\n\n"
+        "• Нажми кнопку ниже — бот сам возьмёт <b>название твоего лота</b>: сравнит с лотами "
+        "той же категории и способа получения, где то же число (номинал), например 100.\n"
+        "• Или пришли ключевые слова из названий конкурентов, например <code>100 робукс</code>. "
+        "Числа сравниваются целиком (100 ≠ 1000), слова — по началу («робукс» = «робуксов»).",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [_btn("🏷 По названию моего лота", "dp:byname")],
+        ]),
     )
+
+
+async def _ask_step(message: Message, state: FSMContext) -> None:
+    await state.set_state(AddPriceRule.step)
+    await message.answer("Шаг 3/4. На сколько рублей быть дешевле самого дешёвого конкурента? Например <code>1</code>:")
 
 
 @router.message(AddPriceRule.competitor, F.text, ~F.text.func(is_cancel))
 async def add_competitor(message: Message, state: FSMContext) -> None:
     await state.update_data(competitor=message.text.strip()[:255])
-    await state.set_state(AddPriceRule.step)
-    await message.answer("Шаг 3/4. На сколько рублей быть дешевле самого дешёвого конкурента? Например <code>1</code>:")
+    await _ask_step(message, state)
+
+
+@router.callback_query(StateFilter(AddPriceRule.competitor), F.data == "dp:byname")
+async def add_competitor_by_name(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(competitor=pricing.NAME_KW)
+    await cb.answer("По названию лота")
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _ask_step(cb.message, state)
+
+
+@router.callback_query(F.data == "dp:byname")
+async def add_competitor_by_name_stale(cb: CallbackQuery) -> None:
+    await cb.answer("Начни заново: «➕ Добавить лот».", show_alert=True)
 
 
 @router.message(AddPriceRule.step, F.text, ~F.text.func(is_cancel))
@@ -201,6 +234,155 @@ async def run_now(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCiph
     lines = ["<b>📉 Проверка цен:</b>", ""]
     lines += [f"{'✅' if ch else '•'} {html.escape(r.lot_key[:50])}: {html.escape(note)}" for r, note, ch in results]
     await cb.message.answer("\n".join(lines)[:4000])
+
+
+# ----- ✂️ разовое снижение цены своих лотов -----
+
+
+def _cut_lines(lots: list[dict], cut: pricing.Cut | None = None) -> list[str]:
+    out = []
+    for lot in lots[:pricing.MAX_CUT_LOTS]:
+        price = lot.get("price")
+        if not isinstance(price, (int, float)):
+            out.append(f"• {html.escape(lot['name'][:50])}")
+        elif cut is None:
+            out.append(f"• {html.escape(lot['name'][:50])} — {pricing._rub(price)}")
+        else:
+            new = max(cut.target(price), 0)
+            arrow = f"{pricing._rub(price)} → ~{pricing._rub(new)}" if new < price else f"{pricing._rub(price)} (не трогаю)"
+            out.append(f"• {html.escape(lot['name'][:50])}: {arrow}")
+    return out
+
+
+@router.callback_query(F.data == "dp:cut")
+async def cut_start(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        seller = await get_or_create_seller(session, cb.from_user)
+    if not seller.is_connected:
+        await cb.answer("Аккаунт не подключён", show_alert=True)
+        return
+    await state.set_state(CutPrice.lots)
+    await cb.answer()
+    await cb.message.answer(
+        "✂️ <b>Снизить цену своих лотов</b>\n\n"
+        "Шаг 1/2. Какие лоты? Пришли:\n"
+        "• ключевые слова, например <code>робукс</code> или <code>100 робукс</code> — все твои активные "
+        "лоты с ними в названии;\n"
+        "• или точное название лота;\n"
+        "• или ссылку на лот.",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.message(CutPrice.lots, F.text, ~F.text.func(is_cancel))
+async def cut_lots(message: Message, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    async with sessions() as session:
+        seller = await get_or_create_seller(session, message.from_user)
+    if not seller.is_connected:
+        await state.clear()
+        await message.answer("Аккаунт Playerok не подключён.", reply_markup=main_menu(False))
+        return
+    wait = await message.answer("🔎 Ищу твои лоты…")
+    try:
+        async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+            items = await client.my_items(seller.playerok_id or "", limit=96, statuses=["APPROVED"])
+    except (AuthRequired, PlayerokError) as e:
+        await wait.edit_text(f"⚠️ Playerok: <code>{html.escape(str(e))[:300]}</code>\nПопробуй ещё раз или нажми «Отмена».")
+        return
+    found = pricing.select_my_lots(items, message.text)
+    if not found:
+        await wait.edit_text(
+            f"Среди активных лотов ({len(items)}) ничего не нашёл по «{html.escape(message.text[:60])}». "
+            "Пришли другие слова или нажми «Отмена»."
+        )
+        return
+    lots = [{"id": it.id, "name": it.name, "price": it.price} for it in found[:pricing.MAX_CUT_LOTS]]
+    await state.update_data(cut_lots=lots)
+    await state.set_state(CutPrice.amount)
+    more = f"\n…и ещё {len(found) - len(lots)} — за раз не больше {pricing.MAX_CUT_LOTS}." if len(found) > len(lots) else ""
+    await wait.edit_text(
+        f"Нашёл {len(found)}:\n" + "\n".join(_cut_lines(lots)) + more + "\n\n"
+        "Шаг 2/2. <b>На сколько снизить?</b> Цены — для покупателя, как на сайте.\n"
+        "<code>10</code> — на 10 ₽\n<code>5%</code> — на 5 %\n<code>=99</code> — поставить 99 ₽"
+    )
+
+
+@router.message(CutPrice.amount, F.text, ~F.text.func(is_cancel))
+async def cut_amount(message: Message, state: FSMContext) -> None:
+    cut = pricing.parse_cut(message.text)
+    if cut is None:
+        await message.answer("Не понял. Пример: <code>10</code>, <code>5%</code> или <code>=99</code>.")
+        return
+    lots = (await state.get_data()).get("cut_lots") or []
+    await state.update_data(cut_kind=cut.kind, cut_value=cut.value)
+    await state.set_state(CutPrice.confirm)
+    await message.answer(
+        f"✂️ <b>Снизить {cut.label()}?</b>\n\n" + "\n".join(_cut_lines(lots, cut)) + "\n\n"
+        "Точная цена будет после пересчёта комиссии Playerok. Цену только снижаю. "
+        "Возможно, после смены цены лот уйдёт на проверку.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [_btn("✅ Снизить", "dp:cutok"), _btn("Отмена", "dp:cutno")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "dp:cutno")
+async def cut_cancel(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    await state.clear()
+    await cb.answer("Отменено")
+    try:
+        await cb.message.edit_text("Отменено, цены не трогал.")
+    except Exception:
+        pass
+    async with sessions() as session:
+        seller = await get_or_create_seller(session, cb.from_user)
+    await cb.message.answer("Меню:", reply_markup=main_menu(seller.is_connected))
+
+
+@router.callback_query(F.data == "dp:cutok")
+async def cut_apply(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
+    data = await state.get_data()
+    lots, kind, value = data.get("cut_lots"), data.get("cut_kind"), data.get("cut_value")
+    if await state.get_state() != CutPrice.confirm.state or not lots or not kind:
+        await cb.answer("Устарело — начни заново: «✂️ Снизить цену своих лотов».", show_alert=True)
+        return
+    await state.clear()
+    cut = pricing.Cut(kind, float(value))
+    async with sessions() as session:
+        seller = await get_or_create_seller(session, cb.from_user)
+    if not seller.is_connected:
+        await cb.answer("Аккаунт не подключён", show_alert=True)
+        return
+    await cb.answer("Снижаю…")
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)  # чтобы не нажать дважды
+    except Exception:
+        pass
+    await cb.message.answer(f"✂️ Снижаю цены {cut.label()}…", reply_markup=main_menu(True))
+    status = await cb.message.answer(f"⏳ 0 из {len(lots)}…")
+    lines: list[str] = []
+    changed = 0
+    async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
+        for n, lot in enumerate(lots, 1):
+            try:
+                note, ok = await pricing.cut_price(client, lot["id"], cut)
+            except AuthRequired:
+                lines.append("⚠️ Сессия Playerok истекла — остальные не трогал.")
+                break
+            except PlayerokError as e:
+                note, ok = f"ошибка: {str(e)[:200]}", False
+            changed += ok
+            lines.append(f"{'✅' if ok else '•'} {html.escape(lot['name'][:50])}: {html.escape(note)}")
+            log.info("%s снижение цены вручную «%s»: %s", tag(seller.tg_id), lot["name"][:60], note)
+            try:
+                await status.edit_text(f"⏳ {n} из {len(lots)}…")
+            except Exception:
+                pass
+    text = f"✂️ <b>Снижено: {changed} из {len(lots)}</b> ({cut.label()})\n\n" + "\n".join(lines)
+    try:
+        await status.edit_text(text[:4000])
+    except Exception:
+        await cb.message.answer(text[:4000])
 
 
 # ----- цены по номиналам -----
@@ -555,8 +737,8 @@ async def track_min_save(message: Message, state: FSMContext, sessions: SessionF
     await _send_menu(message, sessions, message.from_user.id)
 
 
-@router.message(StateFilter(AddPriceRule, NominalInput), F.text.func(is_cancel))
-@router.message(StateFilter(AddPriceRule, NominalInput), Command("cancel"))
+@router.message(StateFilter(AddPriceRule, NominalInput, CutPrice), F.text.func(is_cancel))
+@router.message(StateFilter(AddPriceRule, NominalInput, CutPrice), Command("cancel"))
 async def cancel(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
     await state.clear()
     async with sessions() as session:
