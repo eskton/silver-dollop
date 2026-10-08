@@ -227,6 +227,36 @@ class PriceRule(Base):
     last_run: Mapped[datetime | None] = mapped_column(DateTime)
 
 
+class CostSection(Base):
+    """Раздел закупки для «Выгоды по рынку»: бренд + страна, свой лот для сравнения,
+    свои номиналы и цены (CostEntry), своя категория FazerCards."""
+
+    __tablename__ = "cost_sections"
+    __table_args__ = (UniqueConstraint("seller_tg_id", "brand", "country"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    brand: Mapped[str] = mapped_column(String(32))  # roblox / apple / psn / xbox / nintendo / steam
+    country: Mapped[str] = mapped_column(String(64))  # ключ из списка стран или своё название
+    lot_ref: Mapped[str] = mapped_column(String(500), default="")  # лот Playerok: категория для сравнения
+    kw: Mapped[str] = mapped_column(String(255), default="")  # слова страны в названиях конкурентов
+    fazer_cat: Mapped[str] = mapped_column(String(64), default="")
+    fazer_name: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CostEntry(Base):
+    """Номинал и закупка в $ внутри раздела."""
+
+    __tablename__ = "cost_entries"
+    __table_args__ = (UniqueConstraint("section_id", "nominal"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    section_id: Mapped[int] = mapped_column(Integer, index=True)
+    seller_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    nominal: Mapped[int] = mapped_column(Integer)
+    cost: Mapped[float] = mapped_column(Float)
+
+
 class ProfitRule(Base):
     """Калькулятор прибыли: ключевое слово из названия лота и чистая прибыль с 1 продажи."""
 
