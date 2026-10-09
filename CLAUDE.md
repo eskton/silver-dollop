@@ -120,6 +120,21 @@ Telegram-бот — помощник продавцов на playerok.com (ан�
   автовыдачей; после выдачи `state.delivered=True` → обычное автоподтверждение.
   Формат `order.cards` в документации не описан: строки или поля code/pin/serial…,
   иначе NEEDS_CHECK. Вживую не проверен.
+  Второй поставщик — AppRoute (`plugins/giftcard/approute.py`, по официальному SDK
+  github.com/AppRoute-FZCO/AppRoute-Public-API-SDK и гайду владельца; сайт approute.io из облака
+  закрыт сетевой политикой): база `https://approute.io/api/v1` или `approute.ru` (кнопка «🌍»,
+  настройка `approute_region`, env `APPROUTE_API_URL`), заголовок X-API-Key, конверт
+  {status, code|statusCode, message|statusMessage, data} (поддержаны оба варианта, числовые коды
+  0/1/2/8/9/10/13). Покупка: POST /orders {ordersType:"shop", referenceId, productId, itemId,
+  quantity, clientTime}; referenceId = uuid5(idem_key) (≤40 симв., повтор → IDEMPOTENCY_REPLAY,
+  второй раз не спишет). Коды в ответе могут быть скрыты «****1234» → GET /orders?referenceId=…
+  &unhide=true. Статусы in_progress/completed/partially_completed/cancelled (и ВЕРХНИМ регистром).
+  `provider` у GiftcardMap/GiftcardOrder (None = fazer), `card_name` — подпись. Ключ — настройка
+  `approute_api_key_enc` (env APPROUTE_API_KEY). Постоянный ключ AppRoute требует белый список
+  IPv4 → запросы идут через прокси (`APPROUTE_PROXY`, иначе `PLAYEROK_PROXY`; "none" — без).
+  В «📦 Разделах закупки» у раздела может быть товар AppRoute (`ar_product`): цены items[].nominal
+  → price; из FazerCards и AppRoute по номиналу берётся дешевле и в наличии (`_cheapest`).
+  Вживую AppRoute не проверен.
 
 ## Логи
 

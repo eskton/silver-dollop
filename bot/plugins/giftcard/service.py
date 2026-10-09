@@ -1,4 +1,5 @@
-"""Плагин Gift Card: заказ Playerok → покупка карты в FazerCards → код покупателю.
+"""Плагин Gift Card: заказ Playerok → покупка карты у поставщика → код покупателю.
+Поставщики: FazerCards (client.py) и AppRoute (approute.py) — у каждой привязки лота свой.
 
 Закрытый: работает только для аккаунтов администраторов (access.is_admin), так как
 покупки идут с баланса владельца по ключу FAZER_API_KEY из переменных окружения.
@@ -43,6 +44,7 @@ from .client import (
     FazerUnknownResult,
     api_key_from_env,
 )
+from .approute import AppRouteClient, norm_status, reference_for, voucher_codes
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +67,17 @@ CODE_FIELDS = (
     ("pin", "PIN"), ("serial", "Серийный номер"), ("card_number", "Номер карты"),
 )
 
-# Только для тестов: подмена HTTP-транспорта FazerCards.
+# Только для тестов: подмена HTTP-транспорта FazerCards и AppRoute.
 TRANSPORT = None
+AR_TRANSPORT = None
+
+PROVIDERS = {"fazer": "FazerCards", "approute": "AppRoute"}
+AR_KEY_SETTING = "approute_api_key_enc"
+AR_REGION_SETTING = "approute_region"  # io — международный, ru — для России
+
+
+def provider_of(obj) -> str:
+    return getattr(obj, "provider", None) or "fazer"
 
 
 def _now() -> datetime:
@@ -80,19 +91,29 @@ def make_client(api_key: str) -> FazerCardsClient:
     return FazerCardsClient(api_key, transport=TRANSPORT)
 
 
-async def get_api_key(session: AsyncSession, tg: int) -> str:
-    """Ключ, введённый в боте (хранится зашифрованным), иначе FAZER_API_KEY из окружения."""
-    enc = await ft.get_setting(session, tg, KEY_SETTING, "")
+async def get_api_key(session: AsyncSession, tg: int, provider: str = "fazer") -> str:
+    """Ключ, введённый в боте (хранится зашифрованным), иначе из окружения
+    (FAZER_API_KEY / APPROUTE_API_KEY)."""
+    setting = AR_KEY_SETTING if provider == "approute" else KEY_SETTING
+    enc = await ft.get_setting(session, tg, setting, "")
     if enc:
         try:
             return _cipher().decrypt(enc)
         except Exception:
-            log.warning("%s GIFTCARD API_ERROR: сохранённый ключ не расшифровывается", tag(tg))
+            log.warning("%s GIFTCARD API_ERROR: сохранённый ключ %s не расшифровывается", tag(tg), provider)
+    if provider == "approute":
+        return os.getenv("APPROUTE_API_KEY", "").strip()
     return api_key_from_env()
 
 
-async def set_api_key(session: AsyncSession, tg: int, key: str) -> None:
-    await ft.set_setting(session, tg, KEY_SETTING, _cipher().encrypt(key) if key else "")
+async def set_api_key(session: AsyncSession, tg: int, key: str, provider: str = "fazer") -> None:
+    setting = AR_KEY_SETTING if provider == "approute" else KEY_SETTING
+    await ft.set_setting(session, tg, setting, _cipher().encrypt(key) if key else "")
+
+
+async def make_approute(session: AsyncSession, tg: int) -> AppRouteClient:
+    region = await ft.get_setting(session, tg, AR_REGION_SETTING, "io")
+    return AppRouteClient(await get_api_key(session, tg, "approute"), region=region, transport=AR_TRANSPORT)
 
 
 def _cipher() -> TokenCipher:
@@ -242,6 +263,7 @@ async def start_manual(session: AsyncSession, tg: int, deal_id: str) -> str:
             card_id=mapping.card_id,
             quantity=mapping.quantity or 1,
             idem_key=f"playerok-{tg}-{st.deal_id}",
+            provider=provider_of(mapping),
             status="PROCESSING",
             updated_at=_now(),
         ))
@@ -282,12 +304,13 @@ async def on_deal(
         if not await _fresh_enough(session, tg, first_seen):
             log.info("%s GIFTCARD сделка %s появилась до включения плагина — пропуск", tag(tg), deal.id)
             return None
-        if not await get_api_key(session, tg):
-            log.warning("%s GIFTCARD API_ERROR: не задан FAZER_API_KEY, сделка %s не обработана", tag(tg), deal.id)
+        prov = provider_of(mapping)
+        if not await get_api_key(session, tg, prov):
+            log.warning("%s GIFTCARD API_ERROR: не задан ключ %s, сделка %s не обработана", tag(tg), prov, deal.id)
             await notify(
                 bot, session, tg, "problem",
-                "🎁 Gift Card: пришёл заказ на привязанный лот, но не задан API-ключ FazerCards. "
-                "Выдай вручную и введи ключ: /giftcard → «🔑 Ввести API-ключ».",
+                f"🎁 Gift Card: пришёл заказ на привязанный лот, но не задан API-ключ {PROVIDERS[prov]}. "
+                "Выдай вручную и введи ключ: /giftcard → «🔑».",
             )
             return None
         order = GiftcardOrder(
@@ -300,6 +323,7 @@ async def on_deal(
             card_id=mapping.card_id,
             quantity=mapping.quantity or 1,
             idem_key=f"playerok-{tg}-{deal.id}",
+            provider=provider_of(mapping),
             status="PROCESSING",
             updated_at=_now(),
         )
@@ -358,6 +382,9 @@ async def advance(
 ) -> None:
     """Двигает заказ по состояниям. Безопасно вызывать на каждом опросе."""
     tg = order.seller_tg_id
+    if provider_of(order) == "approute":
+        await _advance_approute(bot, session, seller, client, order, deal)
+        return
     if order.status in ("PROCESSING", "UNKNOWN"):
         if order.attempts >= MAX_ATTEMPTS:
             return
@@ -405,6 +432,110 @@ async def advance(
         return
     if order.status == "BOUGHT":
         await _deliver(bot, session, seller, client, order, deal)
+
+
+async def _advance_approute(
+    bot: Bot, session: AsyncSession, seller: Seller, client: PlayerokClient, order: GiftcardOrder, deal: Deal | None
+) -> None:
+    """AppRoute: POST /orders с referenceId из ключа заказа (повтор вернёт тот же заказ,
+    второй раз не спишет); коды в ответе бывают скрыты «****1234» — тогда
+    GET /orders?referenceId=…&unhide=true."""
+    tg = order.seller_tg_id
+    ref = reference_for(order.idem_key)
+    api = await make_approute(session, tg)
+    try:
+        if order.status in ("PROCESSING", "UNKNOWN"):
+            if order.attempts >= MAX_ATTEMPTS:
+                return
+            order.attempts += 1
+            order.updated_at = _now()
+            await session.commit()  # попытка учтена до запроса
+            log.info("%s GIFTCARD API_REQUEST AppRoute покупка %s/%s ×%s, попытка %s", tag(tg),
+                     order.category_id, order.card_id, order.quantity, order.attempts)
+            try:
+                result: dict[str, Any] | None = await api.order(order.category_id, order.card_id, order.quantity, ref)
+            except FazerUnknownResult as e:
+                order.status = "UNKNOWN"
+                order.error = str(e)[:500]
+                log.warning("%s GIFTCARD API_ERROR сделка %s: итог неизвестен — %s", tag(tg), order.deal_id, e)
+                if order.attempts >= MAX_ATTEMPTS:
+                    await _tell_admin(bot, session, order,
+                                      f"итог покупки неизвестен после {order.attempts} попыток: {e}. "
+                                      "Повторная покупка не делалась. Проверь заказы в кабинете AppRoute.")
+                return
+            except FazerError as e:
+                await _fail(bot, session, seller, client, order, e)
+                return
+        elif order.status == "AWAITING":
+            try:
+                result = await api.find_order(ref)
+            except FazerError as e:
+                log.info("%s GIFTCARD API_ERROR проверка заказа AppRoute %s: %s", tag(tg), order.deal_id, e)
+                return
+            if result is None:
+                return
+        else:
+            result = None
+        if result is not None:
+            codes, masked = _apply_approute(order, result)
+            if masked and order.status not in ("FAILED",):
+                # Полные коды — отдельным запросом с unhide=true (он отмечает коды полученными).
+                try:
+                    full = await api.find_order(ref)
+                except FazerError as e:
+                    log.info("%s GIFTCARD API_ERROR коды AppRoute %s: %s", tag(tg), order.deal_id, e)
+                    full = None
+                if full is not None:
+                    _apply_approute(order, full)
+                if order.status != "BOUGHT":
+                    order.status = "AWAITING"  # повторим на следующем опросе
+    finally:
+        await api.aclose()
+
+    if order.status == "FAILED":
+        await _fail(bot, session, seller, client, order, FazerError(order.error or "AppRoute отменил заказ"))
+        return
+    if order.status == "BOUGHT":
+        if order.error and order.error.startswith("частично"):
+            await _tell_admin(bot, session, order, f"{order.error}. Выданные коды отправлены покупателю.")
+        await _deliver(bot, session, seller, client, order, deal)
+
+
+def _apply_approute(order: GiftcardOrder, result: dict[str, Any]) -> tuple[list[str], bool]:
+    """Ответ AppRoute (покупка или строка из GET /orders) → состояние заказа.
+    Возвращает (коды, скрыты ли коды)."""
+    tg = order.seller_tg_id
+    order.updated_at = _now()
+    oid = result.get("orderId") or result.get("transactionUUID") or result.get("transactionUuid")
+    if oid:
+        order.provider_order_id = str(oid)[:64]
+    status = norm_status(result.get("status"))
+    price = result.get("price", result.get("amount"))
+    try:
+        if price is not None and float(price) >= 0:
+            order.cost_usd, order.cost_exact = float(price), True
+    except (TypeError, ValueError):
+        pass
+    if status == "CANCELLED":
+        order.status = "FAILED"
+        order.error = "AppRoute отменил заказ"
+        log.warning("%s GIFTCARD API_ERROR AppRoute заказ %s отменён", tag(tg), order.provider_order_id)
+        return [], False
+    vouchers = (result.get("result") or {}).get("vouchers") if isinstance(result.get("result"), dict) else None
+    codes, masked = voucher_codes(vouchers if vouchers is not None else result.get("vouchers"))
+    if codes and not masked:
+        order.codes_enc = _cipher().encrypt("\n\n".join(codes))
+        order.status = "BOUGHT"
+        order.error = None
+        if status == "PARTIALLY_COMPLETED" and len(codes) < (order.quantity or 1):
+            order.error = f"частично: кодов {len(codes)} из {order.quantity}"
+        log.info("%s GIFTCARD API_SUCCESS AppRoute заказ %s: получено кодов %s", tag(tg), order.provider_order_id,
+                 len(codes))
+    else:
+        order.status = "AWAITING"
+        log.info("%s GIFTCARD API_SUCCESS AppRoute заказ %s, коды %s (статус %s)", tag(tg), order.provider_order_id,
+                 "скрыты — запрошу полные" if masked else "ещё не готовы", status)
+    return codes, masked
 
 
 def _apply_order(order: GiftcardOrder, result: dict[str, Any]) -> bool:
@@ -468,6 +599,14 @@ async def _cost_from_catalog(session: AsyncSession, order: GiftcardOrder) -> Non
     """Цена номинала из каталога × количество — если в ответе заказа суммы не было.
     Уже после выдачи, чтобы не задерживать покупателя; ошибки не важны."""
     try:
+        if provider_of(order) == "approute":
+            async with await make_approute(session, order.seller_tg_id) as ar:
+                product = await ar.service(order.category_id)
+            item = next((i for i in product.get("items") or [] if str(i.get("id")) == order.card_id), None)
+            if item is not None:
+                order.cost_usd = float(item.get("price")) * (order.quantity or 1)
+                order.cost_exact = False
+            return
         async with make_client(await get_api_key(session, order.seller_tg_id)) as api:
             data = await api.offers(order.category_id)
         offer = next((o for o in data.get("offers") or [] if str(o.get("card_id")) == order.card_id), None)

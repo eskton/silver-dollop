@@ -1,4 +1,4 @@
-"""/giftcard — управление плагином Gift Card (FazerCards). Только для администратора."""
+"""/giftcard — управление плагином Gift Card (FazerCards и AppRoute). Только для администратора."""
 
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ STATUS_RU = {
 
 class AddMap(StatesGroup):
     lot = State()
+    provider = State()
     category = State()
     card = State()
     quantity = State()
@@ -78,32 +79,40 @@ async def render(sessions: SessionFactory, tg: int) -> tuple[str, InlineKeyboard
         counts = await gc.stats(session, tg)
         maps = list(await session.scalars(select(GiftcardMap).where(GiftcardMap.seller_tg_id == tg)))
         has_key = bool(await gc.get_api_key(session, tg))
+        has_ar = bool(await gc.get_api_key(session, tg, "approute"))
+        region = await ft.get_setting(session, tg, gc.AR_REGION_SETTING, "io")
     ok = counts.get("DELIVERED", 0)
     bad = sum(counts.get(s, 0) for s in ("FAILED", "UNKNOWN", "NEEDS_CHECK"))
     busy = sum(counts.get(s, 0) for s in ("PROCESSING", "AWAITING", "BOUGHT"))
     lines = [
-        "<b>🎁 Gift Card — FazerCards</b>",
+        "<b>🎁 Gift Card — FazerCards и AppRoute</b>",
         "",
         "Оплаченный заказ на привязанный лот → покупка карты у поставщика → код покупателю "
         "в чат → заказ отмечается выполненным (как после автовыдачи).",
         "",
         f"<b>Статус:</b> {'🟢 включено' if enabled else '🔴 выключено'}",
-        f"<b>API-ключ:</b> {'✅ задан' if has_key else '❌ не задан — нажми «🔑 Ввести API-ключ»'}",
+        f"<b>Ключ FazerCards:</b> {'✅ задан' if has_key else '❌ не задан'}",
+        f"<b>Ключ AppRoute:</b> {'✅ задан' if has_ar else '❌ не задан'} (approute.{region})",
         f"<b>Выдано:</b> {ok}   <b>Ошибок:</b> {bad}   <b>В работе:</b> {busy}",
         "",
         f"<b>Привязки ({len(maps)}):</b>",
     ]
     lines += [
-        f"• {html.escape(m.lot_key[:60])} → <code>{html.escape(m.category_id)}</code> / "
-        f"<code>{html.escape(m.card_id)}</code> ×{m.quantity}"
+        f"• {html.escape(m.lot_key[:60])} → {gc.PROVIDERS[gc.provider_of(m)]}: "
+        + (html.escape(m.card_name) if m.card_name
+           else f"<code>{html.escape(m.category_id)}</code> / <code>{html.escape(m.card_id)}</code>")
+        + f" ×{m.quantity}"
         for m in maps
     ] or ["пока нет — добавь кнопкой ниже"]
     rows = [
         [_btn("🔴 Выключить" if enabled else "🟢 Включить", "gc:t")],
-        [_btn("🔌 Проверить API", "gc:check"), _btn("📦 История заказов", "gc:orders")],
-        [_btn("📋 Каталог", "gc:cats"), _btn("💳 Номиналы категории", "gc:offers")],
+        [_btn("🔌 Проверить FazerCards", "gc:check"), _btn("🔌 Проверить AppRoute", "gc:archeck")],
+        [_btn("📦 История заказов", "gc:orders")],
+        [_btn("📋 Каталог Fazer", "gc:cats"), _btn("💳 Номиналы Fazer", "gc:offers")],
         [_btn("➕ Привязать лот", "gc:add")],
-        [_btn("🔑 Ввести API-ключ", "gc:key")] + ([_btn("🗑 Удалить ключ", "gc:keydel")] if has_key else []),
+        [_btn("🔑 Ключ FazerCards", "gc:key")] + ([_btn("🗑", "gc:keydel")] if has_key else []),
+        [_btn("🔑 Ключ AppRoute", "gc:arkey")] + ([_btn("🗑", "gc:arkeydel")] if has_ar else []),
+        [_btn(f"🌍 AppRoute: approute.{region} → .{'ru' if region == 'io' else 'io'}", "gc:arreg")],
     ]
     rows += [[_btn(f"🗑 {m.lot_key[:30]}", f"gc:del:{m.id}")] for m in maps]
     rows.append([_btn("🎁 Выдать по оплаченным заказам", "gc:paid")])
@@ -153,6 +162,30 @@ async def check(cb: CallbackQuery, sessions: SessionFactory) -> None:
         await cb.message.answer(f"🔌 FazerCards: связь есть, баланс <b>{html.escape(balance)} {html.escape(cur)}</b>.")
     except FazerError as e:
         await cb.message.answer(f"🔌 FazerCards: ошибка — <code>{html.escape(str(e))[:300]}</code>")
+
+
+@router.callback_query(F.data == "gc:archeck")
+async def ar_check(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    await cb.answer("Проверяю…")
+    try:
+        async with sessions() as session:
+            api = await gc.make_approute(session, cb.from_user.id)
+        async with api:
+            balance, cur = await api.balance()
+        await cb.message.answer(f"🔌 AppRoute: связь есть, доступно <b>{html.escape(balance)} {html.escape(cur)}</b>.")
+    except FazerError as e:
+        await cb.message.answer(
+            f"🔌 AppRoute: ошибка — <code>{html.escape(str(e))[:300]}</code>\n"
+            "Если ключ постоянный — добавь IP прокси (PLAYEROK_PROXY) в белый список ключа в кабинете AppRoute."
+        )
+
+
+@router.callback_query(F.data == "gc:arreg")
+async def ar_region(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        cur = await ft.get_setting(session, cb.from_user.id, gc.AR_REGION_SETTING, "io")
+        await ft.set_setting(session, cb.from_user.id, gc.AR_REGION_SETTING, "ru" if cur == "io" else "io")
+    await _show(cb, sessions)
 
 
 @router.callback_query(F.data == "gc:cats")
@@ -214,12 +247,49 @@ async def offers_show(message: Message, state: FSMContext, sessions: SessionFact
 @router.callback_query(F.data == "gc:key")
 async def key_ask(cb: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SetKey.key)
+    await state.update_data(provider="fazer")
     await cb.answer()
     await cb.message.answer(
         "Пришли API-ключ FazerCards (начинается с <code>fc_</code>).\n"
         "Сообщение с ключом я сразу удалю, ключ сохраню в зашифрованном виде.",
         reply_markup=cancel_kb(),
     )
+
+
+@router.callback_query(F.data == "gc:arkey")
+async def ar_key_ask(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SetKey.key)
+    await state.update_data(provider="approute")
+    await cb.answer()
+    await cb.message.answer(
+        "Пришли API-ключ AppRoute (кабинет → API-ключи).\n"
+        "Постоянный ключ работает только с разрешённых IP: добавь в его белый список IP своего прокси "
+        "(тот же, что в PLAYEROK_PROXY) — бот ходит в AppRoute через него.\n"
+        "Сообщение с ключом я сразу удалю, ключ сохраню в зашифрованном виде.",
+        reply_markup=cancel_kb(),
+    )
+
+
+async def _ar_key_save(message: Message, state: FSMContext, sessions: SessionFactory, key: str) -> None:
+    if len(key) < 10 or " " in key:
+        await message.answer("Это не похоже на ключ AppRoute. Пришли ещё раз или «Отмена».")
+        return
+    await state.clear()
+    tg = message.from_user.id
+    async with sessions() as session:
+        await gc.set_api_key(session, tg, key, "approute")
+        api = await gc.make_approute(session, tg)
+        seller = await get_or_create_seller(session, message.from_user)
+    try:
+        async with api:
+            balance, cur = await api.balance()
+        check_line = f"✅ Ключ работает, доступно {html.escape(balance)} {html.escape(cur)}."
+    except FazerError as e:
+        check_line = (f"⚠️ Ключ сохранён, но проверка не прошла: <code>{html.escape(str(e))[:200]}</code>\n"
+                      "Проверь белый список IP ключа и домен (кнопка «🌍 AppRoute»).")
+    log.info("GIFTCARD API-ключ AppRoute обновлён админом")
+    await message.answer(f"🔑 Ключ AppRoute сохранён.\n{check_line}", reply_markup=main_menu(seller.is_connected))
+    await _show(message, sessions)
 
 
 @router.message(SetKey.key, F.text, ~F.text.func(is_cancel))
@@ -229,6 +299,9 @@ async def key_save(message: Message, state: FSMContext, sessions: SessionFactory
         await message.delete()  # не оставляем ключ в переписке
     except Exception:
         pass
+    if (await state.get_data()).get("provider") == "approute":
+        await _ar_key_save(message, state, sessions, key)
+        return
     if not key.startswith("fc_") or len(key) < 10 or " " in key:
         await message.answer("Это не похоже на ключ FazerCards (должен начинаться с fc_). Пришли ещё раз или «Отмена».")
         return
@@ -253,6 +326,14 @@ async def key_delete(cb: CallbackQuery, sessions: SessionFactory) -> None:
     async with sessions() as session:
         await gc.set_api_key(session, cb.from_user.id, "")
     log.info("GIFTCARD API-ключ удалён админом")
+    await _show(cb, sessions)
+
+
+@router.callback_query(F.data == "gc:arkeydel")
+async def ar_key_delete(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    async with sessions() as session:
+        await gc.set_api_key(session, cb.from_user.id, "", "approute")
+    log.info("GIFTCARD API-ключ AppRoute удалён админом")
     await _show(cb, sessions)
 
 
@@ -290,7 +371,7 @@ async def _ask_category(message: Message, state: FSMContext, cats: list[tuple[st
         if len(found) > MAX_BUTTONS else "\nМожно написать часть названия для поиска."
     )
     await message.answer(
-        f"Шаг 2/4. Выбери <b>карту</b> (категорию FazerCards):{more}",
+        f"Шаг 2/4. Выбери <b>карту</b> (товар поставщика):{more}",
         reply_markup=_pick_kb(found, "gc:pc"),
     )
 
@@ -300,14 +381,63 @@ async def add_lot(message: Message, state: FSMContext, sessions: SessionFactory)
     raw = message.text.strip()
     key = raw.split("/products/", 1)[1].split("?")[0].strip("/") if "/products/" in raw else raw
     await state.update_data(lot=key[:255])
+    async with sessions() as session:
+        has_fazer = bool(await gc.get_api_key(session, message.from_user.id))
+        has_ar = bool(await gc.get_api_key(session, message.from_user.id, "approute"))
+    if has_ar and has_fazer:
+        await state.set_state(AddMap.provider)
+        await message.answer("У какого поставщика покупать?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [_btn("FazerCards", "gc:pv:fazer"), _btn("AppRoute", "gc:pv:approute")],
+        ]))
+        return
+    if has_ar:
+        await _ar_catalog(message, state, sessions, message.from_user.id)
+        return
+    await _fazer_catalog(message, state, sessions, message.from_user.id)
+
+
+@router.callback_query(AddMap.provider, F.data.startswith("gc:pv:"))
+async def add_provider_pick(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    await cb.answer()
+    if cb.data.endswith(":approute"):
+        await _ar_catalog(cb.message, state, sessions, cb.from_user.id)
+    else:
+        await _fazer_catalog(cb.message, state, sessions, cb.from_user.id)
+
+
+async def _ar_catalog(message: Message, state: FSMContext, sessions: SessionFactory, tg: int) -> None:
+    await state.update_data(provider="approute")
     await state.set_state(AddMap.category)
     try:
-        async with await _client(sessions, message.from_user.id) as api:
+        async with sessions() as session:
+            api = await gc.make_approute(session, tg)
+        async with api:
+            products = await api.services()
+    except FazerError as e:
+        await message.answer(
+            f"Не смог загрузить каталог AppRoute: <code>{html.escape(str(e))[:200]}</code>\n"
+            "Проверь ключ («🔌 Проверить AppRoute») и начни заново."
+        )
+        await state.clear()
+        return
+    cats = [
+        (str(p.get("id")), " · ".join(x for x in (str(p.get("name") or p.get("id")), p.get("countryCode") or "") if x))
+        for p in products if p.get("id") and str(p.get("type") or "voucher") != "direct_topup"
+    ]
+    await state.update_data(cats=cats)
+    await _ask_category(message, state, cats)
+
+
+async def _fazer_catalog(message: Message, state: FSMContext, sessions: SessionFactory, tg: int) -> None:
+    await state.update_data(provider="fazer")
+    await state.set_state(AddMap.category)
+    try:
+        async with await _client(sessions, tg) as api:
             items = await api.categories()
     except FazerError as e:
         await message.answer(
             f"Не смог загрузить каталог FazerCards: <code>{html.escape(str(e))[:200]}</code>\n"
-            "Проверь ключ («🔌 Проверить API») и начни заново."
+            "Проверь ключ («🔌 Проверить FazerCards») и начни заново."
         )
         await state.clear()
         return
@@ -331,17 +461,31 @@ async def add_category_pick(cb: CallbackQuery, state: FSMContext, sessions: Sess
         return
     category_id, name = view[idx]
     await cb.answer()
+    approute = (await state.get_data()).get("provider") == "approute"
     try:
-        async with await _client(sessions, cb.from_user.id) as api:
-            data = await api.offers(category_id)
+        if approute:
+            async with sessions() as session:
+                api = await gc.make_approute(session, cb.from_user.id)
+            async with api:
+                product = await api.service(category_id)
+            offers = [
+                (str(i.get("id")),
+                 f"{i.get('name') or i.get('nominal')} — ${i.get('price')}"
+                 + (f" (в наличии {i.get('stock')})" if i.get("stock") is not None
+                    else "" if i.get("available", True) else " (нет в наличии)"))
+                for i in product.get("items") or [] if i.get("id") is not None
+            ]
+        else:
+            async with await _client(sessions, cb.from_user.id) as api:
+                data = await api.offers(category_id)
+            offers = [
+                (str(o.get("card_id")),
+                 f"{o.get('name')} — ${o.get('price_usd')} (в наличии {o.get('stock')})")
+                for o in data.get("offers") or [] if o.get("card_id") is not None
+            ]
     except FazerError as e:
         await cb.message.answer(f"Не смог загрузить номиналы: <code>{html.escape(str(e))[:200]}</code>")
         return
-    offers = [
-        (str(o.get("card_id")),
-         f"{o.get('name')} — ${o.get('price_usd')} (в наличии {o.get('stock')})")
-        for o in data.get("offers") or [] if o.get("card_id") is not None
-    ]
     if not offers:
         await cb.message.answer(f"В «{html.escape(name)}» сейчас нет номиналов. Выбери другую карту.")
         return
@@ -379,11 +523,14 @@ async def _save_map(user, state: FSMContext, sessions: SessionFactory, qty: int,
         session.add(GiftcardMap(
             seller_tg_id=user.id, lot_key=data["lot"], category_id=data["category"],
             card_id=data["card"], quantity=qty,
+            provider=data.get("provider") or "fazer",
+            card_name=f"{data.get('category_name', '')} — {data.get('card_label', '').split(' — ')[0]}"[:128],
         ))
         await session.commit()
         seller = await get_or_create_seller(session, user)
     await reply.answer(
-        f"✅ Привязано: «{html.escape(data['lot'][:60])}» → {html.escape(data.get('category_name', ''))}, "
+        f"✅ Привязано: «{html.escape(data['lot'][:60])}» → "
+        f"{gc.PROVIDERS.get(data.get('provider') or 'fazer')}: {html.escape(data.get('category_name', ''))}, "
         f"{html.escape(data.get('card_label', data['card']))} ×{qty}",
         reply_markup=main_menu(seller.is_connected),
     )
@@ -475,7 +622,7 @@ async def orders(cb: CallbackQuery, sessions: SessionFactory) -> None:
         "",
         f"<b>Итого выдано:</b> {len(all_done)} шт · продано на {sold:g} ₽ · "
         f"куплено за {'≈' if approx else ''}${spent:,.2f}".replace(",", " "),
-        "<i>≈ — цена номинала из каталога FazerCards на момент выдачи (в ответе заказа суммы не было).</i>"
+        "<i>≈ — цена номинала из каталога поставщика на момент выдачи (в ответе заказа суммы не было).</i>"
         if approx else "",
     ]
     await cb.message.answer("\n".join(lines).strip()[:4000],
@@ -513,7 +660,7 @@ async def paid_list(cb: CallbackQuery, sessions: SessionFactory) -> None:
         lines.append(f"• {html.escape((st.item_name or '')[:50])} — {html.escape(st.buyer or 'покупатель')}")
         kb.append([_btn(f"🎁 Выдать: {(st.buyer or 'покупатель')[:20]} · {(st.item_name or '')[:20]}",
                         f"gc:give:{st.deal_id}"[:64])])
-    lines += ["", "Нажми — бот купит карту у FazerCards и отправит код покупателю в чат (≤30 с), "
+    lines += ["", "Нажми — бот купит карту у поставщика привязки и отправит код покупателю в чат (≤30 с), "
               "затем отметит заказ выполненным."]
     await cb.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
@@ -522,7 +669,8 @@ async def paid_list(cb: CallbackQuery, sessions: SessionFactory) -> None:
 async def paid_give(cb: CallbackQuery, sessions: SessionFactory) -> None:
     deal_id = cb.data.split(":", 2)[2]
     async with sessions() as session:
-        if not await gc.get_api_key(session, cb.from_user.id):
+        if not (await gc.get_api_key(session, cb.from_user.id)
+                or await gc.get_api_key(session, cb.from_user.id, "approute")):
             await cb.answer("Сначала введи API-ключ", show_alert=True)
             return
         result = await gc.start_manual(session, cb.from_user.id, deal_id)
@@ -546,10 +694,42 @@ async def test(cb: CallbackQuery, sessions: SessionFactory) -> None:
     async with sessions() as session:
         maps = list(await session.scalars(select(GiftcardMap).where(GiftcardMap.seller_tg_id == cb.from_user.id)))
     lines = ["<b>🧪 Тест Gift Card (без покупки)</b>", ""]
+    ar_maps = [m for m in maps if gc.provider_of(m) == "approute"]
+    maps = [m for m in maps if gc.provider_of(m) != "approute"]
+    if ar_maps:
+        try:
+            async with sessions() as session:
+                ar = await gc.make_approute(session, cb.from_user.id)
+            async with ar:
+                balance, cur = await ar.balance()
+                lines.append(f"✅ AppRoute: ключ работает, доступно {html.escape(balance)} {html.escape(cur)}")
+                for m in ar_maps:
+                    try:
+                        product = await ar.service(m.category_id)
+                    except FazerError as e:
+                        lines.append(f"❌ {html.escape(m.lot_key[:40])}: {html.escape(str(e))[:150]}")
+                        continue
+                    item = next((i for i in product.get("items") or [] if str(i.get("id")) == m.card_id), None)
+                    if item is None:
+                        lines.append(f"❌ {html.escape(m.lot_key[:40])}: номинала больше нет в AppRoute")
+                        continue
+                    stock = item.get("stock")
+                    ok = item.get("available", True) and (stock is None or stock >= m.quantity)
+                    lines.append(
+                        f"{'✅' if ok else '⚠️'} {html.escape(m.lot_key[:40])}: AppRoute {html.escape(str(item.get('name') or item.get('nominal')))}, "
+                        f"${html.escape(str(item.get('price')))} ×{m.quantity}"
+                        + (f", в наличии {stock}" if stock is not None else "" if item.get("available", True) else ", нет в наличии")
+                    )
+        except FazerError as e:
+            lines.append(f"❌ AppRoute: {html.escape(str(e))[:300]}")
+    if not maps:
+        lines += [] if ar_maps else ["Привязок нет — добавь «➕ Привязать лот»."]
+        await cb.message.answer("\n".join(lines)[:4000])
+        return
     try:
         async with await _client(sessions, cb.from_user.id) as api:
             balance, cur = await api.balance()
-            lines.append(f"✅ Ключ работает, баланс {html.escape(balance)} {html.escape(cur)}")
+            lines.append(f"✅ FazerCards: ключ работает, баланс {html.escape(balance)} {html.escape(cur)}")
             for m in maps:
                 try:
                     data = await api.offers(m.category_id)
@@ -568,8 +748,6 @@ async def test(cb: CallbackQuery, sessions: SessionFactory) -> None:
                 )
     except FazerError as e:
         lines.append(f"❌ {html.escape(str(e))[:300]}")
-    if not maps:
-        lines.append("Привязок нет — добавь «➕ Привязать лот».")
     await cb.message.answer("\n".join(lines)[:4000])
 
 

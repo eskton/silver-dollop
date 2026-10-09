@@ -492,6 +492,47 @@ async def _fazer_costs(session, tg: int, cat: str, currency_first: bool) -> tupl
     return costs, None
 
 
+async def _approute_costs(session, tg: int, product_id: str) -> tuple[dict[int, Cost], str | None]:
+    """Цены AppRoute по номиналам товара (items[].nominal → price) — только админу (ключ владельца)."""
+    from ..plugins.access import is_admin
+    from ..plugins.giftcard import service as gc
+    from ..plugins.giftcard.client import FazerError
+
+    if not product_id or not is_admin(tg):
+        return {}, None
+    if not await gc.get_api_key(session, tg, "approute"):
+        return {}, "AppRoute: не задан API-ключ (/giftcard → 🔑 Ключ AppRoute)"
+    try:
+        async with await gc.make_approute(session, tg) as api:
+            product = await api.service(product_id)
+    except FazerError as e:
+        return {}, str(e)
+    costs: dict[int, Cost] = {}
+    for item in product.get("items") or []:
+        try:
+            nominal, price = float(item.get("nominal")), float(item.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if nominal != int(nominal):
+            continue
+        stock = item.get("stock") if isinstance(item.get("stock"), int) else (0 if item.get("available") is False else None)
+        costs[int(nominal)] = Cost(price, "approute", stock)
+    return costs, None
+
+
+def _cheapest(*sources: dict[int, Cost]) -> dict[int, Cost]:
+    """По каждому номиналу — самый дешёвый поставщик, у которого товар есть в наличии."""
+    best: dict[int, Cost] = {}
+    for src in sources:
+        for n, c in src.items():
+            cur = best.get(n)
+            out = c.stock is not None and c.stock <= 0
+            cur_out = cur is not None and cur.stock is not None and cur.stock <= 0
+            if cur is None or (cur_out and not out) or (out == cur_out and c.usd < cur.usd):
+                best[n] = c
+    return best
+
+
 async def market_setup(session, tg: int) -> MarketSetup:
     """Активный раздел закупки (бренд + страна) или старые общие настройки."""
     from . import market_sections as ms
@@ -505,7 +546,9 @@ async def market_setup(session, tg: int) -> MarketSetup:
     currency_first = sec.brand != "roblox"
     costs = {e.nominal: Cost(e.cost, "manual") for e in await ms.entries(session, sec.id)}
     fazer, note = await _fazer_costs(session, tg, sec.fazer_cat, currency_first)
-    costs.update(fazer)
+    approute, ar_note = await _approute_costs(session, tg, sec.ar_product or "")
+    costs.update(_cheapest(fazer, approute))  # поставщики главнее ручной цены, из них — дешевле
+    note = "; ".join(x for x in (note, ar_note) if x) or None
     return MarketSetup(sec.lot_ref, costs, note, ms.kw_list(sec), currency_first, ms.section_title(sec), sec.id,
                        sec.country)
 
@@ -670,9 +713,9 @@ def market_rows(scan: MarketScan, divisor: float, costs: dict[int, Cost]) -> lis
 
 
 def _cost_label(c: Cost) -> str:
-    if c.source == "fazer":
+    if c.source in ("fazer", "approute"):
         stock = "" if c.stock is None else (" (нет в наличии)" if c.stock <= 0 else f" (в наличии {c.stock})")
-        return f"FazerCards ${c.usd:g}{stock}"
+        return f"{'FazerCards' if c.source == 'fazer' else 'AppRoute'} ${c.usd:g}{stock}"
     return f"закупка ${c.usd:g}"
 
 
@@ -770,7 +813,7 @@ async def track_market(
                              country_key=setup.country_key)
     rows = market_rows(scan, divisor, costs)
     good = [r for r in rows if r.profit is not None and r.profit >= min_profit
-            and not (r.cost and r.cost.source == "fazer" and r.cost.stock == 0)]
+            and not (r.cost and r.cost.source in ("fazer", "approute") and r.cost.stock == 0)]
     seen = {int(x) for x in seen_raw.split(",") if x.strip().isdigit()}
     new = [r for r in good if r.nominal not in seen]
     log.info("%s трекер рынка: выгодных %s, новых %s", tag(tg), len(good), len(new))

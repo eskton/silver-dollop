@@ -21,6 +21,7 @@ router = Router(name="market")
 
 
 class SectionInput(StatesGroup):
+    ar_search = State()
     add = State()
     price = State()
     lot = State()
@@ -131,6 +132,10 @@ async def section_screen(sessions: SessionFactory, tg: int, section_id: int) -> 
     if admin:
         lines.append("<b>FazerCards:</b> " + (html.escape(sec.fazer_name or sec.fazer_cat) + " (главнее ручной)"
                                               if sec.fazer_cat else "не выбран"))
+        lines.append("<b>AppRoute:</b> " + (html.escape(sec.ar_name or sec.ar_product) + " (главнее ручной)"
+                                            if sec.ar_product else "не выбран"))
+        if sec.fazer_cat and sec.ar_product:
+            lines.append("<i>Из двух поставщиков по каждому номиналу берётся тот, где дешевле и есть в наличии.</i>")
     rows = [[_btn("➕ Добавить номиналы", f"mk:add:{sec.id}")]]
     rows += _rows([_btn(f"✏️ {e.nominal} · ${e.cost:g}", f"mk:e:{e.id}") for e in items[:30]], 3)
     rows.append([_btn("🔗 Лот для сравнения", f"mk:lot:{sec.id}"), _btn("🌍 Страна", f"mk:kw:{sec.id}")])
@@ -138,6 +143,9 @@ async def section_screen(sessions: SessionFactory, tg: int, section_id: int) -> 
         rows.append([_btn(f"🎁 FazerCards: {(sec.fazer_name or sec.fazer_cat)[:18]}" if sec.fazer_cat
                           else "🎁 Цены с FazerCards", f"mk:fz:{sec.id}")]
                     + ([_btn("✖️", f"mk:fzx:{sec.id}")] if sec.fazer_cat else []))
+        rows.append([_btn(f"🛒 AppRoute: {(sec.ar_name or sec.ar_product or '')[:18]}" if sec.ar_product
+                          else "🛒 Цены с AppRoute", f"mk:ar:{sec.id}")]
+                    + ([_btn("✖️", f"mk:arx:{sec.id}")] if sec.ar_product else []))
     if not is_active:
         rows.append([_btn("★ Считать по этому разделу", f"mk:use:{sec.id}")])
     rows.append([_btn("▶️ Посчитать", f"mk:run:{sec.id}")])
@@ -417,6 +425,93 @@ async def fazer_ask(cb: CallbackQuery, state: FSMContext, sessions: SessionFacto
     )
 
 
+@router.callback_query(F.data.startswith("mk:ar:"))
+async def ar_ask(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    """Товар AppRoute для раздела — его номиналы и цены станут закупкой."""
+    from ..plugins.access import is_admin
+    from ..plugins.giftcard import service as gc
+
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Только для владельца", show_alert=True)
+        return
+    async with sessions() as session:
+        key = await gc.get_api_key(session, cb.from_user.id, "approute")
+    if not key:
+        await cb.answer("Сначала введи ключ AppRoute: /giftcard → «🔑 Ключ AppRoute»", show_alert=True)
+        return
+    await state.set_state(SectionInput.ar_search)
+    await state.update_data(section_id=int(cb.data.split(":")[2]))
+    await cb.answer()
+    await cb.message.answer(
+        "С каким товаром AppRoute сравнивать? Напиши часть названия, например <code>apple us</code> "
+        "или <code>playstation turkey</code>:",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.message(SectionInput.ar_search, F.text, ~F.text.func(is_cancel))
+async def ar_search(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
+    from ..plugins.giftcard import service as gc
+    from ..plugins.giftcard.client import FazerError
+
+    try:
+        async with sessions() as session:
+            api = await gc.make_approute(session, message.from_user.id)
+        async with api:
+            products = await api.services()
+    except FazerError as e:
+        await message.answer(f"⚠️ <code>{html.escape(str(e))[:200]}</code>")
+        return
+    words = message.text.lower().split()
+    found = []
+    for p in products:
+        label = " · ".join(x for x in (str(p.get("name") or p.get("id")), p.get("countryCode") or "") if x)
+        if p.get("id") and str(p.get("type") or "voucher") != "direct_topup" and all(w in label.lower() for w in words):
+            found.append((str(p.get("id")), label))
+    if not found:
+        await message.answer("Ничего не нашёл. Напиши другую часть названия.")
+        return
+    await state.update_data(ar_found=found[:20])
+    await message.answer("Выбери товар AppRoute:", reply_markup=InlineKeyboardMarkup(
+        inline_keyboard=[[_btn(label[:60], f"mk:arp:{i}")] for i, (_, label) in enumerate(found[:20])]
+    ))
+
+
+@router.callback_query(SectionInput.ar_search, F.data.startswith("mk:arp:"))
+async def ar_pick(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    data = await state.get_data()
+    found, idx = data.get("ar_found") or [], int(cb.data.split(":")[2])
+    if idx >= len(found):
+        await cb.answer("Список устарел, поищи ещё раз", show_alert=True)
+        return
+    product_id, label = found[idx]
+    section_id = int(data.get("section_id") or 0)
+    await state.clear()
+    async with sessions() as session:
+        sec = await ms.get_section(session, cb.from_user.id, section_id)
+        if sec is not None:
+            sec.ar_product, sec.ar_name = product_id[:64], label[:64]
+            await session.commit()
+        seller = await get_or_create_seller(session, cb.from_user)
+    await cb.answer()
+    await cb.message.answer(f"✅ Закупка с AppRoute: {html.escape(label)}", reply_markup=main_menu(seller.is_connected))
+    await send_section(cb.message, sessions, cb.from_user.id, section_id)
+
+
+@router.callback_query(F.data.startswith("mk:arx:"))
+async def ar_off(cb: CallbackQuery, sessions: SessionFactory) -> None:
+    section_id = int(cb.data.split(":")[2])
+    async with sessions() as session:
+        sec = await ms.get_section(session, cb.from_user.id, section_id)
+        if sec is not None:
+            sec.ar_product, sec.ar_name = None, None
+            await session.commit()
+    await cb.answer("AppRoute отключён для раздела")
+    screen = await section_screen(sessions, cb.from_user.id, section_id)
+    if screen:
+        await _show(cb, *screen)
+
+
 @router.callback_query(F.data.startswith("mk:fzx:"))
 async def fazer_off(cb: CallbackQuery, sessions: SessionFactory) -> None:
     section_id = int(cb.data.split(":")[2])
@@ -454,7 +549,7 @@ async def run(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) 
         sec = await ms.get_section(session, cb.from_user.id, section_id)
         if sec is not None:
             await ms.set_active(session, cb.from_user.id, sec)
-            has_costs = bool(await ms.entries(session, sec.id)) or bool(sec.fazer_cat)
+            has_costs = bool(await ms.entries(session, sec.id)) or bool(sec.fazer_cat) or bool(sec.ar_product)
     if sec is None:
         await cb.answer("Раздел удалён", show_alert=True)
         return

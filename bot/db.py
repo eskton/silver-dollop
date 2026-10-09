@@ -244,6 +244,8 @@ class CostSection(Base):
     kw: Mapped[str] = mapped_column(String(255), default="")  # слова страны в названиях конкурентов
     fazer_cat: Mapped[str] = mapped_column(String(64), default="")
     fazer_name: Mapped[str] = mapped_column(String(64), default="")
+    ar_product: Mapped[str | None] = mapped_column(String(64))  # товар AppRoute — цены закупки
+    ar_name: Mapped[str | None] = mapped_column(String(64))
 
 
 class CostEntry(Base):
@@ -283,6 +285,10 @@ class GiftcardMap(Base):
     category_id: Mapped[str] = mapped_column(String(128))
     card_id: Mapped[str] = mapped_column(String(128))
     quantity: Mapped[int] = mapped_column(Integer, default=1)
+    # поставщик: None/"fazer" — FazerCards (category_id/card_id), "approute" — AppRoute
+    # (category_id = товар /services/{id}, card_id = номинал items[].id)
+    provider: Mapped[str | None] = mapped_column(String(16))
+    card_name: Mapped[str | None] = mapped_column(String(128))  # подпись для экрана
 
 
 class GiftcardOrder(Base):
@@ -303,6 +309,7 @@ class GiftcardOrder(Base):
     card_id: Mapped[str] = mapped_column(String(128))
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     idem_key: Mapped[str] = mapped_column(String(255))
+    provider: Mapped[str | None] = mapped_column(String(16))  # None/"fazer" | "approute"
     provider_order_id: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), default="PROCESSING")
     codes_enc: Mapped[str | None] = mapped_column(Text)  # коды, зашифрованные SECRET_KEY
