@@ -129,8 +129,15 @@ async def main():
     # --- лот для сравнения не задан: бот берёт свой лот Apple; расчёт: только лоты США ---
     await hm.add_ask(Cb(f"mk:add:{sec.id}"), state)
     await hm.add_save(Msg("50 45"), state, sessions)
+    PlayerokClient.cache_in_tests = True
+    n_calls = len(CALLS)
     await hm.run(Cb(f"mk:run:{sec.id}"), sessions, cipher)
     report = OUT[-1][0]
+    # свои лоты (1) + по запросу на номинал (4) + «10»: одна доп. страница, а не 6 — дальше не листает
+    assert len(CALLS) - n_calls == 6, CALLS[n_calls:]
+    n_calls = len(CALLS)
+    await hm.run(Cb(f"mk:run:{sec.id}"), sessions, cipher)
+    assert len(CALLS) == n_calls and OUT[-1][0] == report  # повторно за 15 мин — из кэша, без запросов
     print(report)
     async with sessions() as s:
         assert (await ms.get_section(s, 1, sec.id)).lot_ref.endswith("/products/a5")  # свой лот Apple
@@ -170,6 +177,7 @@ async def main():
         await ms.set_active(s, 1, await ms.get_section(s, 1, sec.id))
     print("4. лот берётся из раздела того же бренда; без своих лотов — просит ссылку один раз")
 
+    PlayerokClient.cache_in_tests = False
     # --- страна без проверки ---
     await hm.kw_ask(Cb(f"mk:kw:{sec.id}"), state, sessions)
     await hm.kw_save(Msg("-"), state, sessions)

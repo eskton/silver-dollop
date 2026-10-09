@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -291,6 +292,10 @@ def error_details(error: dict[str, Any]) -> str:
     extra.update({k: v for k, v in error.items() if k not in ("message", "extensions", "locations", "path")})
     return json.dumps(extra, ensure_ascii=False)[:300] if extra else ""
 
+
+# Кэш страниц каталога для «Выгоды по рынку»: повторный расчёт и трекер не тратят лимит.
+ITEMS_CACHE_TTL = 15 * 60
+_ITEMS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 HEADERS = {
     "Accept": "*/*",
@@ -670,19 +675,25 @@ class PlayerokClient:
     # ругнётся на них — отключаем до перезапуска и работаем без них.
     _sort_ok = True
     _search_ok = True
+    cache_in_tests = False  # кэш страниц каталога в тестах (там транспорт подменён)
 
     async def category_items(
         self, category_id: str, pages: int = 5, obtaining_type_id: str | None = None,
         on_page: Any = None, search: str | None = None, sort_price: bool = False,
+        after: str | None = None, until: Callable[[list[Item]], bool] | None = None, cache: bool = False,
     ) -> list[Item]:
         """Лоты всех продавцов в категории (как PlayerokAPI.get_items), только APPROVED.
         obtaining_type_id — только с этим способом получения (код / по нику и т.п.).
         search — текст поиска (filter.searchQuery), sort_price — сначала дешёвые
         (sort {field: price, direction: ASC}). self.last_sorted — пришли ли цены по возрастанию.
         Если Playerok начал отказывать на 2-й и дальше странице — возвращает собранное
-        (self.partial = True), а не теряет всё."""
+        (self.partial = True), а не теряет всё.
+        after — продолжить с этого курсора; until(страница) → True — дальше не листать;
+        self.last_after — курсор следующей страницы (None — больше нет).
+        cache — страницы берутся из общего кэша на ITEMS_CACHE_TTL секунд (каталог одинаков
+        для всех продавцов; включается только для расчёта выгоды, не для снижения цен)."""
         result: list[Item] = []
-        after: str | None = None
+        self.last_after = None
         self.partial = False
         self.last_sorted = False
         filt: dict[str, Any] = {"gameCategoryId": category_id, "status": ["APPROVED"]}
@@ -695,18 +706,31 @@ class PlayerokClient:
             variables: dict[str, Any] = {"pagination": {"first": 24, "after": after}, "filter": filt}
             if use_sort:
                 variables["sort"] = {"field": "price", "direction": "ASC"}
+            use_cache = cache and (self._real_transport() or PlayerokClient.cache_in_tests)
+            key = json.dumps(variables, sort_keys=True, ensure_ascii=False)
+            hit = _ITEMS_CACHE.get(key) if use_cache else None
             try:
-                data = await self._gql("items", "persisted:" + PERSISTED_QUERIES["items"], variables)
+                if hit and time.monotonic() - hit[0] < ITEMS_CACHE_TTL:
+                    data = hit[1]
+                else:
+                    data = await self._gql("items", "persisted:" + PERSISTED_QUERIES["items"], variables)
+                    if use_cache:
+                        if len(_ITEMS_CACHE) >= 600:  # самые старые — вон
+                            for k in sorted(_ITEMS_CACHE, key=lambda k: _ITEMS_CACHE[k][0])[:100]:
+                                _ITEMS_CACHE.pop(k, None)
+                        _ITEMS_CACHE[key] = (time.monotonic(), data)
             except PlayerokError as e:
                 msg = str(e).lower()
                 if page_no == 1 and use_sort and "sort" in msg:
                     log.warning("Playerok: сортировка лотов не принята (%s) — без неё", e)
                     PlayerokClient._sort_ok = False
-                    return await self.category_items(category_id, pages, obtaining_type_id, on_page, search, False)
+                    return await self.category_items(category_id, pages, obtaining_type_id, on_page, search, False,
+                                                     after, until, cache)
                 if page_no == 1 and "searchquery" in msg:
                     log.warning("Playerok: поиск лотов не принят (%s) — без него", e)
                     PlayerokClient._search_ok = False
-                    return await self.category_items(category_id, pages, obtaining_type_id, on_page, None, sort_price)
+                    return await self.category_items(category_id, pages, obtaining_type_id, on_page, None, sort_price,
+                                                     after, until, cache)
                 if not result:
                     raise
                 self.partial = True
@@ -722,6 +746,10 @@ class PlayerokClient:
             page = _get(data, "items", "pageInfo", default={}) or {}
             after = page.get("endCursor")
             if not edges or not page.get("hasNextPage") or not after:
+                self.last_after = None
+                break
+            self.last_after = after
+            if until is not None and until(page_items):
                 break
         return result
 

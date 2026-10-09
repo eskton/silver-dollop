@@ -412,6 +412,7 @@ TRACK_MIN_KEY = "market_track_min"           # минимальная прибы
 TRACK_LAST_KEY = "market_track_last"
 TRACK_SEEN_KEY = "market_track_seen"         # номиналы, о которых уже уведомили
 TRACK_EVERY = timedelta(minutes=30)
+DEEP_PAGES = 5  # сколько ещё страниц листать, если дешёвые лоты номинала — другой страны
 
 
 @dataclass
@@ -545,6 +546,7 @@ async def market_scan(
         )
 
     async def fetch(**kw) -> list[Item]:
+        kw.setdefault("cache", True)  # повторный расчёт за 15 мин — без запросов к Playerok
         try:
             return await client.category_items(item.category_id, obtaining_type_id=filt_way[0], **kw)
         except PlayerokError as e:
@@ -610,15 +612,31 @@ async def market_scan(
             if same:
                 hits += 1
             found = choose(n, same) if same else False
-            if filtering and not found and per_nominal_pages == 1 and len(lots) >= 24:
-                # Дешёвые лоты номинала — другой страны (10 TRY дешевле 10 $) — листаем дальше.
+            next_page = client.last_after
+            if filtering and not found and per_nominal_pages == 1 and next_page:
+                # Дешёвые лоты номинала — другой страны (10 TRY дешевле 10 $): листаем дальше
+                # с того же места и останавливаемся на первой странице, где есть лот своей страны
+                # (выдача по возрастанию цены — он и самый дешёвый).
+                def own_country(page: list[Item], n=n) -> bool:
+                    return any(
+                        suitable(o) and nominal_cur(o.name, currency_first)[0] == n
+                        and country_verdict(o.name, nominal_cur(o.name, currency_first)[1], country_key,
+                                            country_words or []) == "yes"
+                        for o in page
+                    )
+
+                async def deep_page(page: int, pages: int, count: int, n=n) -> None:
+                    if on_step is not None:
+                        await on_step(f"номинал {n}: ищу лоты своей страны, страница {page + 1}")
+
                 try:
-                    more = await fetch(pages=6, search=str(n), sort_price=True)
+                    more = await fetch(pages=DEEP_PAGES, search=str(n), sort_price=True, after=next_page,
+                                       until=own_country, on_page=deep_page)
                 except PlayerokError:
                     partial = True
                     more = []
-                scanned += max(0, len(more) - len(lots))
-                same = [o for o in more if suitable(o) and nominal_of(o.name, currency_first) == n]
+                scanned += len(more)
+                same += [o for o in more if suitable(o) and nominal_of(o.name, currency_first) == n]
                 if same:
                     choose(n, same)
     if not targets or hits == 0:
