@@ -151,6 +151,8 @@ class DealState(Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
     autoconfirm_failed: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    confirm_tries: Mapped[int | None] = mapped_column(Integer, default=0)  # неудачных попыток автоподтверждения
+    confirm_tried_at: Mapped[datetime | None] = mapped_column(DateTime)
     stock_alerted: Mapped[bool | None] = mapped_column(Boolean, default=False)
     relisted: Mapped[bool | None] = mapped_column(Boolean, default=False)
     relist_note: Mapped[str | None] = mapped_column(String(255))  # итог перевыставления

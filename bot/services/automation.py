@@ -43,6 +43,8 @@ REFUND_MARKERS = ("ROLLBACK", "ROLLED_BACK", "REFUND")
 RELIST_STATUSES = ("SOLD", "EXPIRED")
 SOLD_DEAL_STATUSES = ("PAID", "SENT", "CONFIRMED", "COMPLETED")
 ITEMS_CHECK_EVERY = timedelta(minutes=10)
+CONFIRM_TRIES = 3  # попыток автоподтверждения, прежде чем написать продавцу
+CONFIRM_RETRY_AFTER = timedelta(minutes=1)
 
 
 def _link(url: str, text: str) -> str:
@@ -186,35 +188,39 @@ async def _process_deal(
             ready = bool(state.delivered) and await ft.get_flag(
                 session, tg, "autodelivery_confirm", True
             )
+        if ready and state.confirm_tried_at and now - state.confirm_tried_at < CONFIRM_RETRY_AFTER:
+            ready = False  # после сбоя повторяем не чаще раза в минуту
         if ready:
             try:
                 await client.confirm_deal(deal.id)
             except PlayerokError as e:
-                # Сообщаем один раз на заказ, чтобы не спамить каждые 30 секунд.
-                state.autoconfirm_failed = True
-                log.warning("%s автоподтверждение: Playerok отказал для сделки %s: %s", tag(tg), deal.id, e)
-                await notify(
-                    bot, session, tg, "problem",
-                    f"⚠️ Не смог отметить заказ «{html.escape(deal.item_name)}» выполненным: "
-                    f"<code>{html.escape(str(e))[:300]}</code>\n"
-                    f"Отметь вручную: {_link(deal.deal_url, 'Открыть заказ')}\n"
-                    "Пришли этот текст разработчику — поправлю запрос.",
-                )
+                # Playerok иногда отвечает 500 «Something gone wrong» — повторяем на следующих
+                # опросах (свежий статус сделки придёт с опросом: если уже SENT — не повторяем).
+                state.confirm_tries = (state.confirm_tries or 0) + 1
+                state.confirm_tried_at = now
+                log.warning("%s автоподтверждение: попытка %s/%s, Playerok отказал для сделки %s: %s",
+                            tag(tg), state.confirm_tries, CONFIRM_TRIES, deal.id, e)
+                if state.confirm_tries >= CONFIRM_TRIES:
+                    # Сообщаем один раз на заказ, чтобы не спамить каждые 30 секунд.
+                    state.autoconfirm_failed = True
+                    await notify(
+                        bot, session, tg, "problem",
+                        f"⚠️ Не смог отметить заказ «{html.escape(deal.item_name)}» выполненным "
+                        f"({CONFIRM_TRIES} попытки): <code>{html.escape(str(e))[:300]}</code>\n"
+                        f"Отметь вручную: {_link(deal.deal_url, 'Открыть заказ')}",
+                        reply_markup=deal_kb(deal.chat_id, deal_id=deal.id),
+                    )
             else:
-                state.sent_at = now
+                await _autoconfirmed(bot, session, seller, client, deal, state, now)
                 cur = "SENT"
-                log.info("%s автоподтверждение: сделка %s отмечена выполненной", tag(tg), deal.id)
-                if await ft.get_flag(session, tg, "autoconfirm_msg_enabled", True):
-                    await _say(client, deal.chat_id, await _tpl(session, seller, "autoconfirm_msg", deal))
-                await notify(
-                    bot, session, tg, "system",
-                    f"🤝 Автоподтверждение: заказ «{html.escape(deal.item_name)}» отмечен выполненным.",
-                )
-    # --- продавец подтвердил вручную ---
+    # --- продавец подтвердил вручную (или Playerok выполнил запрос, ответив ошибкой) ---
     elif cur == "SENT" and prev != "SENT":
-        state.sent_at = state.sent_at or now
-        if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["after_seller_confirm"]):
-            await _say(client, deal.chat_id, await _tpl(session, seller, "after_seller_confirm", deal))
+        if state.confirm_tries and not state.autoconfirm_failed and state.sent_at is None:
+            await _autoconfirmed(bot, session, seller, client, deal, state, now)
+        else:
+            state.sent_at = state.sent_at or now
+            if await ft.is_enabled(session, tg, ft.FEATURE_BY_KEY["after_seller_confirm"]):
+                await _say(client, deal.chat_id, await _tpl(session, seller, "after_seller_confirm", deal))
 
     # --- лот продан → выставить заново (по сделке, без списка лотов) ---
     if cur in SOLD_DEAL_STATUSES and state.relisted is not True:
@@ -312,6 +318,21 @@ async def _process_deal(
                 await _say(client, deal.chat_id, await _tpl(session, seller, "review_reminder", deal))
 
     state.status = cur
+
+
+async def _autoconfirmed(
+    bot: Bot, session: AsyncSession, seller: Seller, client: PlayerokClient, deal: Deal, state: DealState, now: datetime
+) -> None:
+    """Заказ отмечен выполненным автоподтверждением: сообщение покупателю и продавцу."""
+    tg = seller.tg_id
+    state.sent_at = now
+    log.info("%s автоподтверждение: сделка %s отмечена выполненной", tag(tg), deal.id)
+    if await ft.get_flag(session, tg, "autoconfirm_msg_enabled", True):
+        await _say(client, deal.chat_id, await _tpl(session, seller, "autoconfirm_msg", deal))
+    await notify(
+        bot, session, tg, "system",
+        f"🤝 Автоподтверждение: заказ «{html.escape(deal.item_name)}» отмечен выполненным.",
+    )
 
 
 def _parse_dt(value: str) -> datetime | None:
