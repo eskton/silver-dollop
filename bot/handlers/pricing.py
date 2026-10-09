@@ -618,16 +618,35 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
     async def on_step(note: str) -> None:
         await show(f"🔎 Ищу самые дешёвые лоты… {note}")
 
+    kb = REPORT_KB
     try:
         async with PlayerokClient(cipher.decrypt(seller.token_enc)) as client:
             client.on_wait = on_wait
-            text = await asyncio.wait_for(
-                pricing.nominal_report(client, setup.lot_ref, divisor, costs=setup.costs, cost_note=setup.note,
-                                       own_user_id=seller.playerok_id, on_page=on_page, on_step=on_step,
-                                       country_words=setup.country_words, currency_first=setup.currency_first,
-                                       title=setup.title),
-                timeout=NOMINAL_TIMEOUT,
-            )
+            lot_ref = setup.lot_ref
+            if not lot_ref and setup.section_id:
+                # Лот для сравнения не задан — берём из раздела того же бренда или из своих лотов.
+                from ..services import market_sections as ms
+
+                async with sessions() as session:
+                    sec = await ms.get_section(session, user.id, setup.section_id)
+                    if sec is not None:
+                        lot_ref = await ms.auto_lot_ref(session, client, user.id, sec, seller.playerok_id or "")
+            if not lot_ref:
+                text = (f"Не знаю, где на Playerok искать конкурентов «{html.escape(setup.title)}»: у тебя нет "
+                        "активных лотов этого бренда. Пришли один раз ссылку на любой такой лот (свой или "
+                        "чужой) — «🔗 Лот для сравнения». Для других стран этого бренда повторять не нужно.")
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [_btn("🔗 Лот для сравнения", f"mk:lot:{setup.section_id}")],
+                    [_btn("‹ Раздел", f"mk:s:{setup.section_id}")],
+                ])
+            else:
+                text = await asyncio.wait_for(
+                    pricing.nominal_report(client, lot_ref, divisor, costs=setup.costs, cost_note=setup.note,
+                                           own_user_id=seller.playerok_id, on_page=on_page, on_step=on_step,
+                                           country_words=setup.country_words, currency_first=setup.currency_first,
+                                           title=setup.title, country_key=setup.country_key),
+                    timeout=NOMINAL_TIMEOUT,
+                )
     except asyncio.TimeoutError:
         text = ("⚠️ Playerok слишком долго не отвечал (лимит запросов). Попробуй «🔄 Обновить» через "
                 "пару минут.")
@@ -642,7 +661,7 @@ async def _nominal(message: Message, sessions: SessionFactory, cipher: TokenCiph
         await status.delete()
     except Exception:
         pass
-    await message.answer(text[:4000], reply_markup=REPORT_KB)
+    await message.answer(text[:4000], reply_markup=kb)
 
 
 @router.callback_query(F.data == "dp:nom")
@@ -655,10 +674,7 @@ async def nominal_start(cb: CallbackQuery, sessions: SessionFactory) -> None:
 async def nominal_refresh(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory, cipher: TokenCipher) -> None:
     async with sessions() as session:
         setup = await pricing.market_setup(session, cb.from_user.id)
-    if not setup.lot_ref:
-        if setup.section_id:
-            await cb.answer("У раздела нет лота для сравнения — «🔗 Лот для сравнения»", show_alert=True)
-            return
+    if not setup.lot_ref and not setup.section_id:  # у раздела лот найдётся сам (_nominal)
         await nominal_ask_link(cb, state)
         return
     await cb.answer("Считаю…")
@@ -842,7 +858,7 @@ async def track_toggle(cb: CallbackQuery, sessions: SessionFactory) -> None:
         on = await ft.get_setting(session, tg, pricing.TRACK_KEY, "0") == "1"
         if not on:
             setup = await pricing.market_setup(session, tg)
-            if not setup.lot_ref:
+            if not setup.lot_ref and not setup.section_id:
                 await cb.answer("Сначала «🔗 Лот для категории» — пришли ссылку на лот", show_alert=True)
                 return
             if not setup.costs:

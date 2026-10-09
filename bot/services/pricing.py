@@ -341,22 +341,51 @@ async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str
 import re as _re
 
 NOMINAL_RE = _re.compile(r"(?<![\d.,])(\d{2,6})(?![\d.,])")
-_CUR = (r"(?:\$|€|£|₺|₹|₸|¥|₽|usd|eur|gbp|try|tl|inr|pln|zł|aed|sar|brl|jpy|kzt|uah|ars|rub"
-        r"|долл\w*|евро|фунт\w*|лир\w*|руп\w*|злот\w*|дирх\w*|риал\w*|реал\w*|иен\w*|тенге|грив\w*|песо|руб\w*)")
+# Валюты номиналов подарочных карт: код → как пишут в названиях лотов.
+CURRENCIES = {
+    "USD": r"\$|usd|долл\w*",
+    "EUR": r"€|eur|евро",
+    "GBP": r"£|gbp|фунт\w*",
+    "TRY": r"₺|try|tl|лир\w*",
+    "INR": r"₹|inr|руп\w*",
+    "PLN": r"zł|pln|злот\w*",
+    "AED": r"aed|дирх\w*",
+    "SAR": r"sar|риал\w*",
+    "BRL": r"brl|реал\w*",
+    "JPY": r"¥|jpy|yen|иен\w*",
+    "KZT": r"₸|kzt|тенге",
+    "UAH": r"uah|грив\w*",
+    "ARS": r"ars|песо",
+    "RUB": r"₽|rub|руб\w*",
+}
+_CUR_CODES = [(code, _re.compile(rx, _re.I)) for code, rx in CURRENCIES.items()]
+_CUR = "(" + "|".join(CURRENCIES.values()) + ")"
 _NOM_CUR_RE = _re.compile(r"(?<![\d.,])(\d{1,6})\s*" + _CUR + r"(?![a-zа-я])", _re.I)
 _CUR_NOM_RE = _re.compile(r"(?<![a-zа-я])" + _CUR + r"\s*(\d{1,6})(?![\d.,])", _re.I)
 
 
-def nominal_of(name: str, currency_first: bool = False) -> int | None:
-    """Номинал из названия: первое число 2–6 цифр («✅ДЛЯ РФ✅100 РОБУКСОВ» → 100).
-    currency_first — для подарочных карт: сначала число рядом с валютой («Apple 5$ USA» → 5,
-    «PSN 100 TL» → 100), иначе первое число 2–6 цифр."""
+def currency_code(token: str) -> str | None:
+    return next((code for code, rx in _CUR_CODES if rx.fullmatch(token.strip())), None)
+
+
+def nominal_cur(name: str, currency_first: bool = False) -> tuple[int | None, str | None]:
+    """(номинал, валюта). currency_first — для подарочных карт: число рядом с валютой
+    («Apple 5$ USA» → 5 USD, «PSN 100 TL» → 100 TRY), иначе первое число 2–6 цифр."""
     if currency_first:
-        m = _NOM_CUR_RE.search(name or "") or _CUR_NOM_RE.search(name or "")
+        m = _NOM_CUR_RE.search(name or "")
         if m:
-            return int(m.group(1))
+            return int(m.group(1)), currency_code(m.group(2))
+        m = _CUR_NOM_RE.search(name or "")
+        if m:
+            return int(m.group(2)), currency_code(m.group(1))
     m = NOMINAL_RE.search(name or "")
-    return int(m.group(1)) if m else None
+    return (int(m.group(1)) if m else None), None
+
+
+def nominal_of(name: str, currency_first: bool = False) -> int | None:
+    """Номинал из названия: первое число 2–6 цифр («✅ДЛЯ РФ✅100 РОБУКСОВ» → 100);
+    с currency_first — сначала число рядом с валютой (см. nominal_cur)."""
+    return nominal_cur(name, currency_first)[0]
 
 
 def parse_costs(text: str) -> dict[int, float]:
@@ -399,6 +428,7 @@ class MarketScan:
     partial: bool
     way: str
     loose: set[int] = field(default_factory=set)  # номиналы, где страна в названиях не нашлась
+    absent: set[int] = field(default_factory=set)  # номиналы, где лотов нужной страны нет
 
 
 @dataclass
@@ -412,6 +442,7 @@ class MarketSetup:
     currency_first: bool = False
     title: str = ""
     section_id: int | None = None
+    country_key: str = ""
 
 
 @dataclass
@@ -474,7 +505,8 @@ async def market_setup(session, tg: int) -> MarketSetup:
     costs = {e.nominal: Cost(e.cost, "manual") for e in await ms.entries(session, sec.id)}
     fazer, note = await _fazer_costs(session, tg, sec.fazer_cat, currency_first)
     costs.update(fazer)
-    return MarketSetup(sec.lot_ref, costs, note, ms.kw_list(sec), currency_first, ms.section_title(sec), sec.id)
+    return MarketSetup(sec.lot_ref, costs, note, ms.kw_list(sec), currency_first, ms.section_title(sec), sec.id,
+                       sec.country)
 
 
 async def load_costs(session, tg: int) -> tuple[dict[int, Cost], str | None]:
@@ -486,7 +518,7 @@ async def load_costs(session, tg: int) -> tuple[dict[int, Cost], str | None]:
 async def market_scan(
     client: PlayerokClient, lot_ref: str, pages: int = 5, own_user_id: str | None = None, on_page=None,
     targets: list[int] | None = None, on_step=None, country_words: list[str] | None = None,
-    currency_first: bool = False,
+    currency_first: bool = False, country_key: str = "",
 ) -> MarketScan:
     """Самый дешёвый ЧУЖОЙ лот каждого номинала в категории (и способе получения) лота lot_ref.
 
@@ -523,17 +555,28 @@ async def market_scan(
             filt_way[0] = None
             return await client.category_items(item.category_id, **kw)
 
-    from .market_sections import country_match
+    from .market_sections import country_verdict
 
-    def pick(lots: list[Item]) -> list[Item]:
-        """Лоты нужной страны (если слов страны нет — все)."""
-        if not country_words:
-            return lots
-        own = [o for o in lots if country_match(o.name, country_words)]
-        return own
+    def choose(n: int, same: list[Item]) -> bool:
+        """Самый дешёвый лот номинала своей страны. Лоты другой страны (по словам или
+        валюте: «10 TRY» — не США) не берём никогда; без страны в названии — только если
+        своих нет (строка помечается). True — нашли лот своей страны."""
+        yes, unknown = [], []
+        for o in same:
+            v = country_verdict(o.name, nominal_cur(o.name, currency_first)[1], country_key, country_words or [])
+            (yes if v == "yes" else unknown if v == "unknown" else []).append(o)
+        if yes:
+            best[n] = min(yes, key=lambda o: o.price)
+            loose.discard(n)
+            return True
+        if unknown:
+            best[n] = min(unknown, key=lambda o: o.price)
+            loose.add(n)
+        return False
 
     best: dict[int, Item] = {}
     loose: set[int] = set()
+    filtering = bool(country_words)
     scanned = 0
     partial = False
     hits = 0
@@ -566,10 +609,18 @@ async def market_scan(
             same = [o for o in lots if suitable(o) and nominal_of(o.name, currency_first) == n]
             if same:
                 hits += 1
-                mine = pick(same)
-                if not mine:
-                    loose.add(n)
-                best[n] = min(mine or same, key=lambda o: o.price)
+            found = choose(n, same) if same else False
+            if filtering and not found and per_nominal_pages == 1 and len(lots) >= 24:
+                # Дешёвые лоты номинала — другой страны (10 TRY дешевле 10 $) — листаем дальше.
+                try:
+                    more = await fetch(pages=6, search=str(n), sort_price=True)
+                except PlayerokError:
+                    partial = True
+                    more = []
+                scanned += max(0, len(more) - len(lots))
+                same = [o for o in more if suitable(o) and nominal_of(o.name, currency_first) == n]
+                if same:
+                    choose(n, same)
     if not targets or hits == 0:
         try:
             lots = await fetch(pages=max(pages, 15) if targets else pages, on_page=on_page, sort_price=True)
@@ -584,12 +635,10 @@ async def market_scan(
             if n is not None:
                 by_nominal.setdefault(n, []).append(o)
         for n, same in by_nominal.items():
-            mine = pick(same)
-            if not mine:
-                loose.add(n)
-            best[n] = min(mine or same, key=lambda o: o.price)
+            choose(n, same)
     way = f" · {html.escape(item.obtaining_type_name)}" if item.obtaining_type_name else ""
-    return MarketScan(best, scanned, partial, way, loose)
+    absent = {n for n in (targets or []) if n not in best}
+    return MarketScan(best, scanned, partial, way, loose, absent)
 
 
 def market_rows(scan: MarketScan, divisor: float, costs: dict[int, Cost]) -> list[MarketRow]:
@@ -628,12 +677,15 @@ def render_market(
         line = (f"<b>{r.nominal}</b> · {_rub(r.lot.price)} ÷ {divisor:g} = <b>${r.usd:.2f}</b> — "
                 f'<a href="{r.lot.url}">лот</a>')
         if r.nominal in scan.loose:
-            line += " <i>(страна в названиях не указана — лот любой страны)</i>"
+            line += " <i>(в названии страна не указана — проверь лот)</i>"
         if r.cost is not None:
             margin = f" ({r.profit / r.cost.usd * 100:+.0f}%)" if r.cost.usd > 0 else ""
             line += (f"\n   {_cost_label(r.cost)} → прибыль <b>${r.profit:+.2f}</b>{margin} "
                      f"{'✅' if r.profit > 0 else '❌'}")
         lines.append(line)
+    if scan.absent:
+        lines += ["", f"Нет лотов конкурентов{' этой страны' if title else ''} для: "
+                      f"{', '.join(map(str, sorted(scan.absent)))}."]
     missing = [r.nominal for r in rows if r.cost is None]
     if missing:
         lines += ["", f"Закупка не задана для: {', '.join(map(str, missing[:20]))} — «📦 Разделы закупки» или «🎁 FazerCards»."]
@@ -645,12 +697,14 @@ async def nominal_report(
     costs: dict | None = None, own_user_id: str | None = None,
     on_page=None, cost_note: str | None = None, on_step=None,
     country_words: list[str] | None = None, currency_first: bool = False, title: str = "",
+    country_key: str = "",
 ) -> str:
     """Калькулятор выгоды по рынку (отчёт целиком). costs — {номинал: Cost} или {номинал: $}."""
     norm = {n: (c if isinstance(c, Cost) else Cost(float(c), "manual")) for n, c in (costs or {}).items()}
     scan = await market_scan(client, lot_ref, pages=pages, own_user_id=own_user_id, on_page=on_page,
                              targets=sorted(norm) or None, on_step=on_step,
-                             country_words=country_words, currency_first=currency_first)
+                             country_words=country_words, currency_first=currency_first,
+                             country_key=country_key)
     return render_market(scan, divisor, norm, cost_note, title)
 
 
@@ -663,9 +717,6 @@ async def track_market(
     async with sessions() as session:
         if not force and await ft.get_setting(session, tg, TRACK_KEY, "0") != "1":
             return None
-        setup = await market_setup(session, tg)
-        if not setup.lot_ref:
-            return None
         now = datetime.utcnow()
         if not force:
             raw = await ft.get_setting(session, tg, TRACK_LAST_KEY, "")
@@ -675,7 +726,17 @@ async def track_market(
                 last = None
             if last and now - last < TRACK_EVERY:
                 return None
+        # Отметку ставим сразу: даже если ниже что-то не задано, не дёргаем API каждые 30 с.
         await ft.set_setting(session, tg, TRACK_LAST_KEY, now.isoformat())
+        setup = await market_setup(session, tg)
+        if not setup.lot_ref and setup.section_id:
+            from . import market_sections as ms
+
+            sec = await ms.get_section(session, tg, setup.section_id)
+            if sec is not None:
+                setup.lot_ref = await ms.auto_lot_ref(session, client, tg, sec, seller.playerok_id or "")
+        if not setup.lot_ref:
+            return None
         divisor = await get_divisor(session, tg)
         try:
             min_profit = float(await ft.get_setting(session, tg, TRACK_MIN_KEY, "0.01"))
@@ -687,7 +748,8 @@ async def track_market(
         return None
     # Сканирование Playerok — вне сессии БД (может идти до минуты из-за лимита запросов).
     scan = await market_scan(client, setup.lot_ref, pages=5, own_user_id=seller.playerok_id, targets=sorted(costs),
-                             country_words=setup.country_words, currency_first=setup.currency_first)
+                             country_words=setup.country_words, currency_first=setup.currency_first,
+                             country_key=setup.country_key)
     rows = market_rows(scan, divisor, costs)
     good = [r for r in rows if r.profit is not None and r.profit >= min_profit
             and not (r.cost and r.cost.source == "fazer" and r.cost.stock == 0)]

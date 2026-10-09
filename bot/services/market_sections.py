@@ -23,25 +23,39 @@ BRANDS: dict[str, str] = {
     "roblox": "🧱 Roblox",
 }
 
-# ключ → (название, слова страны в названиях лотов конкурентов)
-COUNTRIES: dict[str, tuple[str, str]] = {
-    "us": ("🇺🇸 США", "usa, сша, us, america, америк"),
-    "tr": ("🇹🇷 Турция", "turkey, turkiye, турц, tr, tl"),
-    "eu": ("🇪🇺 Европа", "europe, европ, eu, euro, евро"),
-    "de": ("🇩🇪 Германия", "germany, герман, de"),
-    "gb": ("🇬🇧 Англия", "uk, britain, англ, великобрит, gbp"),
-    "pl": ("🇵🇱 Польша", "poland, польш, pln"),
-    "in": ("🇮🇳 Индия", "india, инди, inr"),
-    "ae": ("🇦🇪 ОАЭ", "uae, оаэ, эмират, aed"),
-    "sa": ("🇸🇦 Саудовская Аравия", "saudi, ksa, саудов, sar"),
-    "br": ("🇧🇷 Бразилия", "brazil, brasil, бразил, brl"),
-    "jp": ("🇯🇵 Япония", "japan, япон, jpy"),
-    "kz": ("🇰🇿 Казахстан", "kazakhstan, казах, kz, kzt"),
-    "ar": ("🇦🇷 Аргентина", "argentina, аргент, ars"),
-    "ua": ("🇺🇦 Украина", "ukraine, украин, ua, uah"),
-    "ru": ("🇷🇺 Россия", "russia, росси, рф, ru"),
-    "any": ("🌐 Без страны", ""),
+# ключ → (название, слова страны в названиях лотов конкурентов, валюты номинала)
+COUNTRIES: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "us": ("🇺🇸 США", "usa, сша, us, america, америк", ("USD",)),
+    "tr": ("🇹🇷 Турция", "turkey, turkiye, турц, tr, tl", ("TRY",)),
+    "eu": ("🇪🇺 Европа", "europe, европ, eu, euro, евро", ("EUR",)),
+    "de": ("🇩🇪 Германия", "germany, герман, de", ("EUR",)),
+    "gb": ("🇬🇧 Англия", "uk, britain, англ, великобрит, gbp", ("GBP",)),
+    "pl": ("🇵🇱 Польша", "poland, польш, pln", ("PLN",)),
+    "in": ("🇮🇳 Индия", "india, инди, inr", ("INR",)),
+    "ae": ("🇦🇪 ОАЭ", "uae, оаэ, эмират, aed", ("AED",)),
+    "sa": ("🇸🇦 Саудовская Аравия", "saudi, ksa, саудов, sar", ("SAR",)),
+    "br": ("🇧🇷 Бразилия", "brazil, brasil, бразил, brl", ("BRL",)),
+    "jp": ("🇯🇵 Япония", "japan, япон, jpy", ("JPY",)),
+    "kz": ("🇰🇿 Казахстан", "kazakhstan, казах, kz, kzt", ("KZT",)),
+    "ar": ("🇦🇷 Аргентина", "argentina, аргент, ars", ("ARS",)),
+    "ua": ("🇺🇦 Украина", "ukraine, украин, ua, uah", ("UAH",)),
+    "ru": ("🇷🇺 Россия", "russia, росси, рф, ru", ("RUB",)),
+    "any": ("🌐 Без страны", "", ()),
 }
+
+# слова бренда в названиях лотов — чтобы найти свой лот для сравнения без ссылки
+BRAND_WORDS: dict[str, tuple[str, ...]] = {
+    "apple": ("apple", "itunes", "app store", "эпл", "эппл"),
+    "psn": ("playstation", "psn", "ps store", "плейстейшн"),
+    "xbox": ("xbox", "иксбокс"),
+    "nintendo": ("nintendo", "eshop", "нинтендо"),
+    "steam": ("steam", "стим"),
+    "roblox": ("robux", "roblox", "робукс", "роблокс"),
+}
+
+
+def _words(text: str) -> list[str]:
+    return [w.strip() for w in text.split(",") if w.strip()]
 
 
 def country_title(key: str) -> str:
@@ -74,6 +88,46 @@ def country_match(name: str, words: list[str]) -> bool:
     return False
 
 
+def country_verdict(name: str, currency: str | None, key: str, words: list[str]) -> str:
+    """Лот конкурента — нужной страны? "yes" / "no" / "unknown" (страна в названии не видна).
+    Слова своей страны → да; слова другой страны → нет; иначе по валюте номинала
+    («10 TRY» для США — нет, «10$» — да)."""
+    if not words:
+        return "yes"  # проверка страны выключена («-»)
+    if country_match(name, words):
+        return "yes"
+    for other, (_, other_words, _) in COUNTRIES.items():
+        if other not in (key, "any") and other_words and country_match(name, _words(other_words)):
+            return "no"
+    currencies = COUNTRIES.get(key, ("", "", ()))[2]
+    if currency and currencies:
+        return "yes" if currency in currencies else "no"
+    return "unknown"
+
+
+async def auto_lot_ref(session: AsyncSession, client, tg: int, sec: CostSection, own_user_id: str) -> str:
+    """Лот для сравнения без ссылки: из другого раздела того же бренда, иначе свой активный
+    лот с названием бренда. Найденный запоминается в разделе. "" — не нашли."""
+    from .automation import norm_lot
+
+    for other in await sections(session, tg, sec.brand):
+        if other.id != sec.id and other.lot_ref:
+            sec.lot_ref = other.lot_ref
+            await session.commit()
+            return sec.lot_ref
+    words = BRAND_WORDS.get(sec.brand, ())
+    if not words or not own_user_id:
+        return ""
+    items = await client.my_items(own_user_id, limit=96, statuses=["APPROVED"])
+    for it in items:
+        name = norm_lot(it.name)
+        if any(norm_lot(w) in name for w in words):
+            sec.lot_ref = it.url[:500]
+            await session.commit()
+            return sec.lot_ref
+    return ""
+
+
 async def sections(session: AsyncSession, tg: int, brand: str | None = None) -> list[CostSection]:
     q = select(CostSection).where(CostSection.seller_tg_id == tg)
     if brand:
@@ -95,7 +149,7 @@ async def get_or_create(session: AsyncSession, tg: int, brand: str, country: str
     if sec is None:
         sec = CostSection(
             seller_tg_id=tg, brand=brand, country=country[:64],
-            kw=COUNTRIES.get(country, ("", ""))[1] if brand != "roblox" else "",
+            kw=COUNTRIES.get(country, ("", "", ()))[1] if brand != "roblox" else "",
             lot_ref="", fazer_cat="", fazer_name="",
         )
         session.add(sec)

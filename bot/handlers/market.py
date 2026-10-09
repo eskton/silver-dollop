@@ -124,7 +124,7 @@ async def section_screen(sessions: SessionFactory, tg: int, section_id: int) -> 
     lines += [
         "",
         "<b>Лот для сравнения:</b> " + (html.escape(sec.lot_ref[:80]) if sec.lot_ref
-                                        else "не задан — «🔗 Лот для сравнения»"),
+                                        else "найду сам среди твоих лотов этого бренда"),
         "<b>Страна в названиях конкурентов:</b> " + (html.escape(", ".join(words)) if words else "не проверяю"),
     ]
     admin = is_admin(tg)
@@ -331,8 +331,9 @@ async def lot_ask(cb: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(section_id=int(cb.data.split(":")[2]))
     await cb.answer()
     await cb.message.answer(
-        "Пришли ссылку на любой лот этой категории и способа получения на Playerok "
-        "(например, свой или чужой лот «Apple 10$ США»). По нему бот поймёт, где искать конкурентов:",
+        "Пришли ссылку на любой лот этого бренда на Playerok (свой или чужой, страна не важна) — "
+        "по нему бот поймёт категорию, где искать конкурентов. Обычно не нужно: бот сам берёт "
+        "твой лот этого бренда.",
         reply_markup=cancel_kb(),
     )
 
@@ -456,9 +457,6 @@ async def run(cb: CallbackQuery, sessions: SessionFactory, cipher: TokenCipher) 
             has_costs = bool(await ms.entries(session, sec.id)) or bool(sec.fazer_cat)
     if sec is None:
         await cb.answer("Раздел удалён", show_alert=True)
-        return
-    if not sec.lot_ref:
-        await cb.answer("Сначала «🔗 Лот для сравнения» — ссылка на лот этой категории", show_alert=True)
         return
     if not has_costs:
         await cb.answer("Сначала «➕ Добавить номиналы»", show_alert=True)
