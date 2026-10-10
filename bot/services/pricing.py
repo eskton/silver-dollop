@@ -228,45 +228,54 @@ def select_my_lots(items: list[Item], query: str) -> list[Item]:
 
 
 MAX_DROP = 0.5  # за раз — не дешевле половины текущей цены (защита от опечаток)
+MAX_RISE = 2.0  # и не дороже двух текущих
 
 
 @dataclass(frozen=True)
 class Cut:
-    kind: str  # set — поставить N ₽, rub — снизить на N ₽, pct — снизить на N %
+    """Изменение цены: set — поставить N ₽, rub — на N ₽, pct — на N %; up — поднять."""
+    kind: str
     value: float
+    up: bool = False
 
     def target(self, price: float) -> float:
+        sign = 1 if self.up else -1
         if self.kind == "pct":
-            return price * (1 - self.value / 100)
+            return price * (1 + sign * self.value / 100)
         if self.kind == "set":
             return self.value
-        return price - self.value
+        return price + sign * self.value
 
     def skip_reason(self, price: float) -> str | None:
-        """Почему этот лот не трогаем (None — снижаем)."""
+        """Почему этот лот не трогаем (None — меняем)."""
         target = round(self.target(price), 2)
-        if target >= price:
-            return "не дороже — не трогаю"
+        if abs(target - price) < 0.01:
+            return "цена уже такая — не трогаю"
         if target < price * MAX_DROP:
             return f"не трогаю: {_rub(target)} — дешевле вдвое, похоже на опечатку"
+        if target > price * MAX_RISE:
+            return f"не трогаю: {_rub(target)} — дороже вдвое, похоже на опечатку"
         return None
 
     def label(self) -> str:
-        if self.kind == "pct":
-            return f"на {self.value:g}%"
         if self.kind == "set":
             return f"до {_rub(self.value)}"
-        return f"на {_rub(self.value)}"
+        sign = "+" if self.up else "−"
+        return f"{sign}{self.value:g}%" if self.kind == "pct" else f"{sign}{_rub(self.value)}"
 
 
 def parse_cut(text: str) -> Cut | None:
-    """«682» / «=682» / «до 682» — поставить 682 ₽; «-10» / «на 10» — снизить на 10 ₽;
-    «-5%» / «5%» — снизить на 5 %."""
+    """«682» / «=682» / «до 682» — поставить 682 ₽; «-10» / «на 10» — дешевле на 10 ₽;
+    «+10» — дороже на 10 ₽; «-5%» / «5%» — дешевле на 5 %; «+5%» — дороже на 5 %."""
     s = text.strip().lower().replace(",", ".").replace("−", "-").replace("–", "-")
     s = s.replace("руб", "").replace("₽", "").replace("р.", "").rstrip("р").replace(" ", "")
-    kind = "set"
+    kind, up = "set", False
     if s.endswith("%"):
-        kind, s = "pct", s[:-1].lstrip("-").removeprefix("на")
+        s = s[:-1].removeprefix("на")
+        kind, up = "pct", s.startswith("+")
+        s = s.lstrip("+-")
+    elif s.startswith("+"):
+        kind, up, s = "rub", True, s[1:]
     elif s.startswith("-"):
         kind, s = "rub", s[1:]
     elif s.startswith("на"):
@@ -278,9 +287,9 @@ def parse_cut(text: str) -> Cut | None:
         v = float(s)
     except ValueError:
         return None
-    if v <= 0 or (kind == "pct" and v >= 100):
+    if v <= 0 or (kind == "pct" and not up and v >= 100):
         return None
-    return Cut(kind, v)
+    return Cut(kind, v, up)
 
 
 _MIN_PRICE_RE = _re_mod.compile(r"minimal price\D*(\d+(?:[.,]\d+)?)", _re_mod.I)
@@ -303,7 +312,7 @@ def price_error(text: str) -> str:
 
 
 async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str, bool]:
-    """Снижает цену одного своего лота. (пометка, изменили ли цену). Цены — для покупателя."""
+    """Меняет цену одного своего лота. (пометка, изменили ли цену). Цены — для покупателя."""
     item = await client.get_item(item_id)
     price, raw = item.price, item.raw_price
     if item.is_premium:
@@ -315,9 +324,13 @@ async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str
         return f"{_rub(price)} — {why}", False
     target = round(cut.target(price), 2)
     k = price / raw  # множитель комиссии площадки
-    new_raw = max(1, math.floor(target / k + 1e-6))  # 1e-6 — от ошибок округления (99/1.1 = 89.999…)
-    if new_raw >= raw:
-        return f"{_rub(price)} — снижать некуда", False
+    # 1e-6 — от ошибок округления (99/1.1 = 89.999…); вниз — с округлением вниз, вверх — вверх
+    if target < price:
+        new_raw = max(1, math.floor(target / k + 1e-6))
+    else:
+        new_raw = math.ceil(target / k - 1e-6)
+    if new_raw == raw:
+        return f"{_rub(price)} — шаг слишком мал, цена не изменится", False
     try:
         answer = await client.update_item_price(item.id, new_raw)
     except AuthRequired:
@@ -328,7 +341,7 @@ async def cut_price(client: PlayerokClient, item_id: str, cut: Cut) -> tuple[str
     if not isinstance(after, (int, float)):
         after = (await client.get_item(item.id)).price
     status = str(answer.get("status") or "")
-    if not isinstance(after, (int, float)) or after >= price:
+    if not isinstance(after, (int, float)) or abs(after - price) < 0.01:
         return f"Playerok принял запрос, но цена осталась {_rub(price)} (статус {status or '?'})", False
     note = f"{_rub(price)} → {_rub(after)}"
     if status and status.upper() not in ("APPROVED", "ACTIVE"):

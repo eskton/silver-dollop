@@ -71,6 +71,7 @@ async def _profile(sessions: SessionFactory, user) -> tuple[str, InlineKeyboardM
         inline_keyboard=[
             [_btn("🔔 Уведомления", "pf:notify")],
             [_btn("💬 Чаты и заказы", "pf:orders")],
+            [_btn("💲 Изменить цену лотов", "dp:cut")],
             [_btn("📣 Мои клиенты", "pf:clients")],
             [_btn("🕒 Часовой пояс", "pf:tz")],
             [_btn("✅ Прочитать все сообщения", "pf:readall")],

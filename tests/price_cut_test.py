@@ -117,8 +117,12 @@ async def main():
     assert pc("-10") == C("rub", 10) and pc("−10 ₽") == C("rub", 10) and pc("на 10") == C("rub", 10)
     assert pc("5%") == C("pct", 5) and pc("-5%") == C("pct", 5) and pc("12,5р") == C("set", 12.5)
     assert pc("0") is None and pc("100%") is None and pc("abc") is None
-    # не дешевле половины за раз и не дороже текущей
-    assert C("rub", 682).skip_reason(700) and C("set", 18).skip_reason(700) and C("set", 800).skip_reason(700)
+    # не дешевле половины и не дороже двух текущих за раз; та же цена — не трогаем
+    assert C("rub", 682).skip_reason(700) and C("set", 18).skip_reason(700) and C("set", 1500).skip_reason(700)
+    assert C("set", 700).skip_reason(700) and C("set", 800).skip_reason(700) is None
+    assert pc("+10") == C("rub", 10, True) and pc("+5%") == C("pct", 5, True) and pc("+ 12,5 ₽") == C("rub", 12.5, True)
+    assert C("rub", 10, True).target(100) == 110 and round(C("pct", 5, True).target(100), 2) == 105
+    assert C("rub", 10, True).label() == "+10 ₽" and C("pct", 5).label() == "−5%" and C("set", 99).label() == "до 99 ₽"
     assert C("set", 682).skip_reason(700) is None and C("pct", 50).skip_reason(700) is None
     # --- выбор своих лотов ---
     items = await PlayerokClient("T").my_items("me", statuses=["APPROVED"])
@@ -150,11 +154,11 @@ async def main():
     assert cb.alerts and await state.get_state() == hp.CutPrice.pick.state
     await hp.cut_pick_all(Cb("dp:csall"), state)
     await hp.cut_pick_ok(Cb("dp:csok"), state)
-    assert "Снижаю 2" in OUT[-1][0] and "330 ₽" in OUT[-1][0] and await state.get_state() == hp.CutPrice.amount.state, OUT[-1][0]
+    assert "Выбрано 2" in OUT[-1][0] and "330 ₽" in OUT[-1][0] and await state.get_state() == hp.CutPrice.amount.state, OUT[-1][0]
     await hp.cut_amount(Msg("сто"), state)
     assert "Не понял" in OUT[-1][0]
     await hp.cut_amount(Msg("-682"), state)  # как на скриншоте: снизить на 682 ₽ — опечатка, не предлагаем
-    assert "Нечего снижать" in OUT[-1][0] and OUT[-1][1] is None and await state.get_state() == hp.CutPrice.amount.state
+    assert "Нечего менять" in OUT[-1][0] and OUT[-1][1] is None and await state.get_state() == hp.CutPrice.amount.state
     await hp.cut_amount(Msg("10%"), state)
     text, kb = OUT[-1]
     assert "110 ₽ → <b>~99 ₽</b>" in text and "330 ₽ → <b>~297 ₽</b>" in text and buttons(kb) == ["dp:cutok", "dp:cutno"], text
@@ -162,42 +166,58 @@ async def main():
     await hp.cut_apply(Cb("dp:cutok"), state, sessions, cipher)
     assert UPDATES == [{"id": "my2", "price": 270}, {"id": "my1", "price": 90}], UPDATES
     final = OUT[-1][0]
-    assert "Снижено: 2 из 2" in final and "110 ₽ → 99 ₽" in final and "330 ₽ → 297 ₽" in final, final
+    assert "Изменено: 2 из 2" in final and "110 ₽ → 99 ₽" in final and "330 ₽ → 297 ₽" in final, final
     cb = Cb("dp:cutok")  # повторное нажатие — ничего не делает
     await hp.cut_apply(cb, state, sessions, cipher)
     assert len(UPDATES) == 2 and cb.alerts and "Устарело" in cb.alerts[0]
     print("4. разово на 10 %:", final.replace("\n", " | "))
 
-    # --- поставить цену; дороже текущей — не трогаем; цена из ответа Playerok ---
+    # --- поставить цену; поднять тоже можно; цена из ответа Playerok ---
     PRICE_IN_ANSWER["on"] = True
     note, ok = await pricing.cut_price(PlayerokClient("T"), "my3", pricing.Cut("set", 44))
     assert ok and UPDATES[-1] == {"id": "my3", "price": 40} and note == "55 ₽ → 44 ₽", note
     n = len(UPDATES)
     note, ok = await pricing.cut_price(PlayerokClient("T"), "my3", pricing.Cut("set", 60))
-    assert not ok and len(UPDATES) == n and "не дороже" in note, note
+    assert ok and UPDATES[-1] == {"id": "my3", "price": 55} and note == "44 ₽ → 60.5 ₽", note  # вверх — с округлением вверх
+    n = len(UPDATES)
+    note, ok = await pricing.cut_price(PlayerokClient("T"), "my3", pricing.Cut("set", 60.5))
+    assert not ok and len(UPDATES) == n and "уже такая" in note, note
     # отмена
     await hp.cut_start(Cb("dp:cut"), state, sessions)
     await hp.cut_lots(Msg("ключ"), state, sessions, cipher)
     await hp.cut_amount(Msg("5"), state)
     await hp.cut_cancel(Cb("dp:cutno"), state, sessions)
     assert await state.get_state() is None and len(UPDATES) == n
-    print("5. «=цена», не поднимает, отмена")
+    print("5. «=цена», поднять тоже можно, отмена")
+
+    # --- /price: поднять цену на 10 ₽ ---
+    MINE["my3"].update(price=55, rawPrice=50)
+    await hp.cut_command(Msg("/price"), state, sessions)
+    assert "Изменить цену своих лотов" in OUT[-1][0] and await state.get_state() == hp.CutPrice.lots.state
+    await hp.cut_lots(Msg("ключ"), state, sessions, cipher)
+    await hp.cut_amount(Msg("+10"), state)
+    text, kb = OUT[-1]
+    assert "Изменить цену: +10 ₽" in text and "55 ₽ → <b>~65 ₽</b>" in text and buttons(kb) == ["dp:cutok", "dp:cutno"], text
+    n = len(UPDATES)
+    await hp.cut_apply(Cb("dp:cutok"), state, sessions, cipher)
+    assert UPDATES[n:] == [{"id": "my3", "price": 60}] and "55 ₽ → 66 ₽" in OUT[-1][0], (UPDATES[n:], OUT[-1][0])
+    print("5b. /price → «+10» → цена поднята:", OUT[-1][0].replace("\n", " | "))
 
     # --- скриншот: лот за 700 — премиум (цену менять нельзя), за 684 — обычный ---
     MINE["my1"].update(price=700, rawPrice=636, priority="PREMIUM"); MINE["my2"].update(price=684, rawPrice=622)
     await hp.cut_start(Cb("dp:cut"), state, sessions)
     await hp.cut_lots(Msg("робукс"), state, sessions, cipher)
     text = OUT[-1][0]
-    assert "Премиум-лоты (1) пропускаю" in text and "Снижаю 1" in text and "700" not in text, text
+    assert "Премиум-лоты (1) пропускаю" in text and "Выбрано 1" in text and "700" not in text, text
     assert await state.get_state() == hp.CutPrice.amount.state  # один обычный лот — без выбора
     await hp.cut_amount(Msg("682"), state)
     text, kb = OUT[-1]
     assert "Поставить цену 682 ₽" in text and "684 ₽ → <b>~682 ₽</b>" in text and "700 ₽" not in text, text
-    assert kb.inline_keyboard[0][0].text == "✅ Да, снизить (1)"
+    assert kb.inline_keyboard[0][0].text == "✅ Да, изменить (1)"
     n = len(UPDATES)
     await hp.cut_apply(Cb("dp:cutok"), state, sessions, cipher)
     final = OUT[-1][0]
-    assert "Снижено: 1 из 1" in final and "684 ₽ → 682" in final, final
+    assert "Изменено: 1 из 1" in final and "684 ₽ → 682" in final, final
     assert UPDATES[n:] == [{"id": "my2", "price": 620}], UPDATES[n:]  # премиум-лот за 700 не трогали
     # даже если премиум-лот попадёт в список — цену ему не меняем
     n = len(UPDATES)

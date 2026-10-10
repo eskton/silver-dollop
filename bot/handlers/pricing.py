@@ -96,7 +96,7 @@ async def render_dumping(
         [_btn("🔴 Отключить" if enabled else "🟢 Включить", f"f:{feature.key}:t")],
         [_btn(f"⏱ Проверять раз в {interval} мин", f"f:{feature.key}:p:dumping_interval_min")],
         [_btn("➕ Добавить лот", "dp:add"), _btn("▶️ Проверить сейчас", "dp:run")],
-        [_btn("✂️ Снизить цену своих лотов сейчас", "dp:cut")],
+        [_btn("💲 Изменить цену своих лотов", "dp:cut")],
     ]
     rows += [[_btn(f"🗑 {r.lot_key[:30]}", f"dp:del:{r.id}")] for r in rules]
     rows.append([_btn("‹ Назад", "st")])
@@ -261,22 +261,19 @@ def _cut_lines(lots: list[dict], cut: pricing.Cut | None = None) -> tuple[list[s
 
 AMOUNT_HELP = (
     "<code>682</code> — поставить цену 682 ₽\n"
-    "<code>-10</code> — снизить на 10 ₽\n"
-    "<code>-5%</code> — снизить на 5 %"
+    "<code>-10</code> / <code>+10</code> — дешевле / дороже на 10 ₽\n"
+    "<code>-5%</code> / <code>+5%</code> — дешевле / дороже на 5 %"
 )
 
 
-@router.callback_query(F.data == "dp:cut")
-async def cut_start(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+async def _cut_begin(message: Message, state: FSMContext, sessions: SessionFactory, user) -> bool:
     async with sessions() as session:
-        seller = await get_or_create_seller(session, cb.from_user)
+        seller = await get_or_create_seller(session, user)
     if not seller.is_connected:
-        await cb.answer("Аккаунт не подключён", show_alert=True)
-        return
+        return False
     await state.set_state(CutPrice.lots)
-    await cb.answer()
-    await cb.message.answer(
-        "✂️ <b>Снизить цену своих лотов</b>\n\n"
+    await message.answer(
+        "💲 <b>Изменить цену своих лотов</b>\n\n"
         "Шаг 1/3. Какие лоты? Пришли:\n"
         "• ключевые слова, например <code>робукс</code> или <code>100 робукс</code> — все твои активные "
         "лоты с ними в названии;\n"
@@ -284,6 +281,20 @@ async def cut_start(cb: CallbackQuery, state: FSMContext, sessions: SessionFacto
         "• или ссылку на лот.",
         reply_markup=cancel_kb(),
     )
+    return True
+
+
+@router.callback_query(F.data == "dp:cut")
+async def cut_start(cb: CallbackQuery, state: FSMContext, sessions: SessionFactory) -> None:
+    await cb.answer()
+    if not await _cut_begin(cb.message, state, sessions, cb.from_user):
+        await cb.message.answer("Аккаунт Playerok не подключён.")
+
+
+@router.message(Command("price"))
+async def cut_command(message: Message, state: FSMContext, sessions: SessionFactory) -> None:
+    if not await _cut_begin(message, state, sessions, message.from_user):
+        await message.answer("Аккаунт Playerok не подключён — нажми «🔑 Войти в Playerok».")
 
 
 @router.message(CutPrice.lots, F.text, ~F.text.func(is_cancel))
@@ -363,7 +374,7 @@ def _pick_kb(lots: list[dict], sel: set[int]) -> InlineKeyboardMarkup:
 async def _ask_amount(msg: Message, state: FSMContext, lots: list[dict], note: str = "") -> None:
     await state.set_state(CutPrice.amount)
     await msg.edit_text(
-        f"Снижаю {len(lots)}:\n" + "\n".join(_cut_lines(lots)[0]) + note + "\n\n"
+        f"Выбрано {len(lots)}:\n" + "\n".join(_cut_lines(lots)[0]) + note + "\n\n"
         "Шаг 3/3. <b>Какая новая цена?</b> Цены — для покупателя, как на сайте.\n" + AMOUNT_HELP
     )
 
@@ -415,7 +426,7 @@ async def cut_pick_ok(cb: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("dp:cs"))
 async def cut_pick_stale(cb: CallbackQuery) -> None:
-    await cb.answer("Устарело — начни заново: «✂️ Снизить цену своих лотов».", show_alert=True)
+    await cb.answer("Устарело — начни заново: «💲 Изменить цену своих лотов».", show_alert=True)
 
 
 @router.message(CutPrice.amount, F.text, ~F.text.func(is_cancel))
@@ -428,18 +439,18 @@ async def cut_amount(message: Message, state: FSMContext) -> None:
     lines, will = _cut_lines(lots, cut)
     if not will:
         await message.answer(
-            "\n".join(lines) + "\n\nНечего снижать. Пришли другое число:\n" + AMOUNT_HELP
+            "\n".join(lines) + "\n\nНечего менять. Пришли другое число:\n" + AMOUNT_HELP
         )
         return
-    await state.update_data(cut_kind=cut.kind, cut_value=cut.value)
+    await state.update_data(cut_kind=cut.kind, cut_value=cut.value, cut_up=cut.up)
     await state.set_state(CutPrice.confirm)
-    title = f"Поставить цену {pricing._rub(cut.value)}" if cut.kind == "set" else f"Снизить {cut.label()}"
+    title = f"Поставить цену {pricing._rub(cut.value)}" if cut.kind == "set" else f"Изменить цену: {cut.label()}"
     await message.answer(
         f"✂️ <b>{title}?</b>\n\n" + "\n".join(lines) + "\n\n"
-        "Точная цена будет после пересчёта комиссии Playerok. Цену только снижаю и не дешевле "
-        "половины текущей за раз. Возможно, после смены цены лот уйдёт на проверку.",
+        "Точная цена будет после пересчёта комиссии Playerok. За раз — не дешевле половины и не "
+        "дороже двух текущих цен. Возможно, после смены цены лот уйдёт на проверку.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [_btn(f"✅ Да, снизить ({will})", "dp:cutok"), _btn("Отмена", "dp:cutno")],
+            [_btn(f"✅ Да, изменить ({will})", "dp:cutok"), _btn("Отмена", "dp:cutno")],
         ]),
     )
 
@@ -462,21 +473,21 @@ async def cut_apply(cb: CallbackQuery, state: FSMContext, sessions: SessionFacto
     data = await state.get_data()
     lots, kind, value = data.get("cut_lots"), data.get("cut_kind"), data.get("cut_value")
     if await state.get_state() != CutPrice.confirm.state or not lots or not kind:
-        await cb.answer("Устарело — начни заново: «✂️ Снизить цену своих лотов».", show_alert=True)
+        await cb.answer("Устарело — начни заново: «💲 Изменить цену своих лотов».", show_alert=True)
         return
     await state.clear()
-    cut = pricing.Cut(kind, float(value))
+    cut = pricing.Cut(kind, float(value), bool(data.get("cut_up")))
     async with sessions() as session:
         seller = await get_or_create_seller(session, cb.from_user)
     if not seller.is_connected:
         await cb.answer("Аккаунт не подключён", show_alert=True)
         return
-    await cb.answer("Снижаю…")
+    await cb.answer("Меняю…")
     try:
         await cb.message.edit_reply_markup(reply_markup=None)  # чтобы не нажать дважды
     except Exception:
         pass
-    await cb.message.answer(f"✂️ Снижаю цены {cut.label()}…", reply_markup=main_menu(True))
+    await cb.message.answer(f"💲 Меняю цены {cut.label()}…", reply_markup=main_menu(True))
     status = await cb.message.answer(f"⏳ 0 из {len(lots)}…")
     lines: list[str] = []
     changed = 0
@@ -491,12 +502,12 @@ async def cut_apply(cb: CallbackQuery, state: FSMContext, sessions: SessionFacto
                 note, ok = pricing.price_error(str(e)), False
             changed += ok
             lines.append(f"{'✅' if ok else '•'} {html.escape(lot['name'][:50])}: {html.escape(note)}")
-            log.info("%s снижение цены вручную «%s»: %s", tag(seller.tg_id), lot["name"][:60], note)
+            log.info("%s изменение цены вручную «%s»: %s", tag(seller.tg_id), lot["name"][:60], note)
             try:
                 await status.edit_text(f"⏳ {n} из {len(lots)}…")
             except Exception:
                 pass
-    text = f"✂️ <b>Снижено: {changed} из {len(lots)}</b> ({cut.label()})\n\n" + "\n".join(lines)
+    text = f"💲 <b>Изменено: {changed} из {len(lots)}</b> ({cut.label()})\n\n" + "\n".join(lines)
     try:
         await status.edit_text(text[:4000])
     except Exception:

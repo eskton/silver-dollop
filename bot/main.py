@@ -20,6 +20,7 @@ COMMANDS = [
     BotCommand(command="settings", description="Автоматизация"),
     BotCommand(command="stats", description="Аналитика продаж"),
     BotCommand(command="profile", description="Профиль: уведомления, заказы, клиенты"),
+    BotCommand(command="price", description="Изменить цену своих лотов"),
     BotCommand(command="notify", description="Настройки уведомлений"),
     BotCommand(command="logs", description="Логи бота файлом"),
     BotCommand(command="help", description="Помощь"),
