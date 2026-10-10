@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 from .client import FazerAuthError, FazerError, FazerUnknownResult, Transport
@@ -69,6 +68,11 @@ def _code(payload: dict[str, Any]) -> str:
     if isinstance(c, int) or (isinstance(c, str) and c.isdigit()):
         return NUMERIC_CODES.get(int(c), str(c))
     return str(c or "").upper()
+
+
+def _is_validation(e: FazerError) -> bool:
+    """Ошибка проверки данных запроса: заказ не создан, денег не списано."""
+    return e.code == "VALIDATION_ERROR" or "validation error" in str(e).lower()
 
 
 def norm_status(value: Any) -> str:
@@ -207,19 +211,27 @@ class AppRouteClient:
         return data
 
     async def order(self, product_id: str, item_id: str, quantity: int, reference_id: str) -> dict[str, Any]:
-        """Покупка кода (shop). Без автоповторов: повтор — только с тем же referenceId."""
-        data = await self._request(
-            "POST", "/orders",
-            body={
-                "ordersType": "shop",
-                "referenceId": reference_id,
-                "productId": product_id,
-                "itemId": item_id,
-                "quantity": quantity,
-                "clientTime": datetime.now(timezone.utc).isoformat(),
-            },
-            purchase=True,
-        )
+        """Покупка кода (shop). Без автоповторов: повтор — только с тем же referenceId.
+
+        Тело — массив orders с denominationId (гайд AppRoute). Поля productId/itemId/quantity/
+        clientTime на верхнем уровне (как в SDK) AppRoute вживую отклонил: «orders: Field
+        required; productId: Extra inputs are not permitted». Если не примет denominationId —
+        один раз itemId: ошибка проверки данных значит, что заказ не создан и денег не списано.
+        """
+        def body(key: str) -> dict[str, Any]:
+            return {"ordersType": "shop", "referenceId": reference_id,
+                    "orders": [{key: item_id, "quantity": quantity}]}
+
+        try:
+            data = await self._request("POST", "/orders", body=body("denominationId"), purchase=True)
+        except (FazerUnknownResult, FazerAuthError):
+            raise
+        except FazerError as e:
+            text = str(e)
+            if not (_is_validation(e) and ("denominationId" in text or "itemId" in text)):
+                raise
+            log.info("AppRoute: denominationId не принят (%s) — пробую itemId", text[:300])
+            data = await self._request("POST", "/orders", body=body("itemId"), purchase=True)
         if not isinstance(data, dict):
             raise FazerUnknownResult("AppRoute: в ответе на покупку нет заказа", transient=True)
         return data

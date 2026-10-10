@@ -650,8 +650,11 @@ async def retry(session: AsyncSession, order: GiftcardOrder) -> str:
     """Ручной повтор из /giftcard. FAILED — поставщик точно не продал, можно новый ключ;
     UNKNOWN — повтор с ТЕМ ЖЕ ключом (вернёт исходный заказ, если он был)."""
     if order.status == "FAILED":
-        order.idem_key = f"{order.idem_key.split('#')[0]}#r{order.attempts + 1}"
+        base, _, suffix = order.idem_key.partition("#r")
+        n = int(suffix) + 1 if suffix.isdigit() else order.attempts + 1
+        order.idem_key = f"{base}#r{n}"  # каждый ручной повтор — свой ключ (свой referenceId)
         order.status = "PROCESSING"
+        order.attempts = 0
     elif order.status == "UNKNOWN":
         order.attempts = 0
     elif order.status == "NEEDS_CHECK" and order.codes_enc:

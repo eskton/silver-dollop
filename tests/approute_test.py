@@ -71,8 +71,21 @@ async def approute(method, url, headers, params, body):
                     "items": [{"id": "psn-tr-250", "name": "250 TRY", "nominal": 250, "price": 6.4, "currency": "USDT", "available": True, "stock": 5}]})
     if path == "/orders" and method == "POST":
         assert headers["Content-Type"] == "application/json"
-        assert body["ordersType"] == "shop" and body["productId"] == "psn-tr" and body["itemId"] == "psn-tr-250"
-        assert body["quantity"] == 1 and len(body["referenceId"]) == 36, body
+        # как живой AppRoute: лишние поля верхнего уровня запрещены, orders обязателен
+        bad = [f"{k}: Extra inputs are not permitted" for k in body if k not in ("ordersType", "referenceId", "orders")]
+        if "orders" not in body:
+            bad.insert(0, "orders: Field required")
+        item_key = "itemId" if A["mode"] == "itemid" else "denominationId"
+        line = (body.get("orders") or [{}])[0]
+        if "orders" in body and item_key not in line:
+            bad += [f"orders.0.{k}: Extra inputs are not permitted" for k in line if k not in (item_key, "quantity")]
+            bad.append(f"orders.0.{item_key}: Field required")
+        if bad:
+            A["invalid"] = A.get("invalid", 0) + 1
+            return 422, json.dumps({"status": "CANCELLED", "code": 3, "message": "Validation error", "traceId": "t-3",
+                                    "data": None, "errors": [{"field": b.split(": ")[0], "message": b.split(": ")[1]} for b in bad]})
+        assert body["ordersType"] == "shop" and line == {item_key: "psn-tr-250", "quantity": 1}, body
+        assert len(body["referenceId"]) == 36, body
         ref = body["referenceId"]
         mode = A["mode"]
         if mode == "timeout":  # покупка прошла, ответ потерялся
@@ -148,9 +161,10 @@ async def main():
     sent = [t for c, t in CHAT if c == "c-d1"]
     assert sum("89M9-5E9J-R2DJ" in t for t in sent) == 1 and any("Серийный номер: SN-1" in t for t in sent), sent
     assert not any("****" in t for t in sent)
-    assert A["charges"] == 1 and CONFIRMED == ["d1"] and st.delivered
+    assert A["charges"] == 1 and CONFIRMED == ["d1"] and st.delivered and not A.get("invalid")
     post = [c for c in A["calls"] if c[0] == "POST"][-1]
     assert post[4]["referenceId"] == reference_for(f"playerok-{tg}-d1")
+    assert post[4]["orders"] == [{"denominationId": "psn-tr-250", "quantity": 1}], post[4]
     assert "ar_SECRET_KEY" not in LOG.getvalue() and "89M9-5E9J-R2DJ" not in LOG.getvalue()
     print("1. заказ → покупка в AppRoute → полный код покупателю → заказ отмечен выполненным")
 
@@ -197,6 +211,44 @@ async def main():
         o = await s.scalar(select(GiftcardOrder).where(GiftcardOrder.deal_id == "d5"))
     assert o.status == "FAILED" and "белый список IP" in o.error, o.error
     print("5. неверный ключ → «проверь ключ и белый список IP»")
+
+    # 5б. старый формат (productId/itemId наверху) AppRoute отклоняет — как вживую
+    async with AppRouteClient("ar_SECRET_KEY", transport=approute) as api:
+        try:
+            await api._request("POST", "/orders", body={"ordersType": "shop", "referenceId": "r" * 36, "productId": "psn-tr",
+                                                        "itemId": "psn-tr-250", "quantity": 1}, purchase=True)
+            raise AssertionError("должна быть ошибка")
+        except Exception as e:
+            assert "Validation error [orders: Field required; productId: Extra inputs" in str(e), e
+            assert type(e).__name__ == "FazerError", type(e)  # заказ не создан → FAILED, а не «неизвестно»
+    # 5в. если AppRoute ждёт itemId вместо denominationId — второй запрос с тем же referenceId, одна покупка
+    A["mode"] = "itemid"
+    invalid, charges = A.get("invalid", 0), A["charges"]
+    DEALS["d6"] = ["PAID", "PlayStation 250 TRY"]
+    for _ in range(3):
+        await poll()
+    async with sessions() as s:
+        o = await s.scalar(select(GiftcardOrder).where(GiftcardOrder.deal_id == "d6"))
+    assert o.status == "DELIVERED", (o.status, o.error)
+    assert A["invalid"] == invalid + 1 and A["charges"] == charges + 1, (A["invalid"], A["charges"])
+    posts = [c[4] for c in A["calls"] if c[0] == "POST"][-2:]
+    assert posts[0]["referenceId"] == posts[1]["referenceId"] and "denominationId" in posts[0]["orders"][0], posts
+    print("5б-в. формат orders[]: старый формат отклонён; denominationId → itemId без второй покупки")
+    # 5г. «🔁 Повторить» у неудачного заказа (d5, ключ был неверный) — новый referenceId, покупка проходит
+    A["mode"] = "ok"
+    for _ in range(6):  # сколько ни нажимай — повтор срабатывает (счётчик попыток сбрасывается)
+        async with sessions() as s:
+            o = await s.scalar(select(GiftcardOrder).where(GiftcardOrder.deal_id == "d5"))
+            o.status = "FAILED"
+            assert "ближайшем опросе" in await gc.retry(s, o)
+    async with sessions() as s:
+        o = await s.scalar(select(GiftcardOrder).where(GiftcardOrder.deal_id == "d5"))
+    assert o.idem_key.endswith("#r7") and o.status == "PROCESSING" and o.attempts == 0, (o.idem_key, o.status)
+    await poll(); await poll()
+    async with sessions() as s:
+        o = await s.scalar(select(GiftcardOrder).where(GiftcardOrder.deal_id == "d5"))
+    assert o.status == "DELIVERED", (o.status, o.error)
+    print("5г. «Повторить» после ошибки — новая покупка с новым referenceId")
 
     # 7. экраны /giftcard: ключ AppRoute (сообщение удаляется), привязка лота кнопками
     from aiogram.fsm.context import FSMContext

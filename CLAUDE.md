@@ -131,9 +131,12 @@ Telegram-бот — помощник продавцов на playerok.com (ан�
   закрыт сетевой политикой): база `https://approute.io/api/v1` или `approute.ru` (кнопка «🌍»,
   настройка `approute_region`, env `APPROUTE_API_URL`), заголовок X-API-Key, конверт
   {status, code|statusCode, message|statusMessage, data} (поддержаны оба варианта, числовые коды
-  0/1/2/8/9/10/13). Покупка: POST /orders {ordersType:"shop", referenceId, productId, itemId,
-  quantity, clientTime}; referenceId = uuid5(idem_key) (≤40 симв., повтор → IDEMPOTENCY_REPLAY,
-  второй раз не спишет). Коды в ответе могут быть скрыты «****1234» → GET /orders?referenceId=…
+  0/1/2/8/9/10/13). Покупка: POST /orders {ordersType:"shop", referenceId, orders:[{denominationId,
+  quantity}]} — формат SDK (productId/itemId/quantity/clientTime наверху) вживую отклонён
+  «Validation error [orders: Field required; productId: Extra inputs are not permitted…]»; если не
+  примет denominationId — один повтор с itemId внутри orders (ошибка проверки = заказ не создан).
+  referenceId = uuid5(idem_key) (≤40 симв., повтор → IDEMPOTENCY_REPLAY, второй раз не спишет).
+  «🔁 Повторить» у FAILED — новый ключ `#rN` и сброс счётчика попыток. Коды в ответе могут быть скрыты «****1234» → GET /orders?referenceId=…
   &unhide=true. Статусы in_progress/completed/partially_completed/cancelled (и ВЕРХНИМ регистром).
   `provider` у GiftcardMap/GiftcardOrder (None = fazer), `card_name` — подпись. Ключ — настройка
   `approute_api_key_enc` (env APPROUTE_API_KEY). Постоянный ключ AppRoute требует белый список
